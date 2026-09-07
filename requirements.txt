@@ -14,3 +14,4 @@ schedule==1.2.2
 python-multipart==0.0.20
 openpyxl==3.1.5
 garminconnect>=0.2.19
+apscheduler==3.10.4

@@ -639,7 +639,7 @@ def render_sidebar() -> None:
             f'<div class="success-box" style="font-size:13px">Garmin: <b>{garmin_email}</b></div>',
             unsafe_allow_html=True,
         )
-        g_days = st.sidebar.selectbox("Sync days", [7, 14, 30], key="garmin_sync_days", label_visibility="collapsed")
+        g_days = st.sidebar.selectbox("Sync days", [2, 7, 14, 30], key="garmin_sync_days", label_visibility="collapsed")
         if st.sidebar.button("Sync Garmin Data", use_container_width=True):
             with st.spinner("Syncing Garmin metrics…"):
                 gr = requests.post(f"{BACKEND_URL}/garmin/sync?days={g_days}", timeout=120)

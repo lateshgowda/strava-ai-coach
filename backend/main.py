@@ -1,6 +1,9 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 from pydantic import BaseModel
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -60,11 +63,37 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
+def _auto_garmin_sync() -> None:
+    """Background job: sync last 2 days of Garmin data at 9 AM daily."""
+    try:
+        from backend.db.database import SessionLocal
+        import backend.services.garmin_service as _gsvc
+        from backend.models.garmin import GarminToken as _GT
+        db = SessionLocal()
+        try:
+            token = db.query(_GT).first()
+            if token:
+                result = _gsvc.sync_recent(db, token.tokenstore, days=2)
+                logger.info("Auto Garmin sync: %s", result)
+            else:
+                logger.debug("Auto Garmin sync skipped — no token stored.")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Auto Garmin sync error: %s", exc)
+
+
+_scheduler = BackgroundScheduler()
+_scheduler.add_job(_auto_garmin_sync, CronTrigger(hour=9, minute=0), id="garmin_daily_sync")
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     logger.info("Initialising database…")
     init_db()
     logger.info("Database ready.")
+    _scheduler.start()
+    logger.info("Scheduled Garmin auto-sync at 09:00 daily.")
 
 
 # ---------------------------------------------------------------------------
