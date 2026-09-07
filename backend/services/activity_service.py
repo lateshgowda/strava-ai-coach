@@ -93,6 +93,49 @@ class ActivityService:
             yesterday = _datetime_mod.date.today() - _datetime_mod.timedelta(days=1)
             today_health = get_health_data_for_date(self._db, yesterday)
 
+        # Fetch today's Garmin daily metrics (Body Battery, stress, recovery time, VO2 max).
+        # Also used as sleep/RHR fallback when Apple Health is not synced.
+        garmin_today = None
+        _garmin_vo2max = None
+        try:
+            from backend.models.garmin import GarminDailyMetrics as _GDM
+            _garmin_row = (
+                self._db.query(_GDM)
+                .filter(_GDM.date == _datetime_mod.date.today())
+                .first()
+            )
+            if _garmin_row is None:
+                _gd_yest = _datetime_mod.date.today() - _datetime_mod.timedelta(days=1)
+                _garmin_row = (
+                    self._db.query(_GDM)
+                    .filter(_GDM.date == _gd_yest)
+                    .first()
+                )
+            garmin_today = _garmin_row
+            # Find most recent VO2 max (only synced occasionally)
+            _vo2_row = (
+                self._db.query(_GDM)
+                .filter(_GDM.vo2max.isnot(None))
+                .order_by(_GDM.date.desc())
+                .first()
+            )
+            if _vo2_row:
+                _garmin_vo2max = _vo2_row.vo2max
+        except Exception:
+            pass
+
+        # Resolve sleep / RHR: Apple Health first, Garmin fallback
+        _sleep_hours = today_health.sleep_duration_hours if today_health else None
+        _sleep_deep_hours = today_health.sleep_deep_hours if today_health else None
+        _resting_hr = today_health.resting_hr if today_health else None
+        if garmin_today:
+            if _sleep_hours is None and garmin_today.sleep_duration_sec:
+                _sleep_hours = garmin_today.sleep_duration_sec / 3600.0
+            if _sleep_deep_hours is None and garmin_today.sleep_deep_sec:
+                _sleep_deep_hours = garmin_today.sleep_deep_sec / 3600.0
+            if _resting_hr is None and garmin_today.resting_hr:
+                _resting_hr = garmin_today.resting_hr
+
         # Pull profile baseline resting HR for elevation comparison
         _baseline_rhr = None
         try:
@@ -111,10 +154,13 @@ class ActivityService:
             consecutive_training_days=training_status["consecutive_training_days"],
             recovery_debt=training_state["recovery_debt"],
             overreaching=training_state["overreaching"],
-            sleep_hours=today_health.sleep_duration_hours if today_health else None,
-            sleep_deep_hours=today_health.sleep_deep_hours if today_health else None,
-            resting_hr=today_health.resting_hr if today_health else None,
+            sleep_hours=_sleep_hours,
+            sleep_deep_hours=_sleep_deep_hours,
+            resting_hr=_resting_hr,
             baseline_resting_hr=_baseline_rhr,
+            body_battery_max=garmin_today.body_battery_max if garmin_today else None,
+            recovery_time_hours=garmin_today.recovery_time_hours if garmin_today else None,
+            stress_avg=garmin_today.stress_avg if garmin_today else None,
         )
 
         injury_risk = compute_injury_risk(
@@ -135,6 +181,7 @@ class ActivityService:
             hr_efficiency_trend=training_state["hr_efficiency_trend"]["trend"],
             pace_efficiency_trend=training_state["pace_efficiency_trend"]["trend"],
             acwr=acwr,
+            vo2max=_garmin_vo2max,
         )
 
         weekly_plan = generate_weekly_plan(
@@ -203,6 +250,7 @@ class ActivityService:
             "is_connected": is_connected,
             "athlete_name": token.athlete_name if token else None,
             "today_health": _health_row_to_dict(today_health) if today_health else None,
+            "garmin_today": {**_garmin_row_to_dict(garmin_today), "vo2max_latest": _garmin_vo2max} if garmin_today else None,
         }
 
     # ------------------------------------------------------------------
@@ -338,4 +386,22 @@ def _health_row_to_dict(row: Any) -> Dict[str, Any]:
         "sleep_core_hours": row.sleep_core_hours,
         "sleep_awake_hours": row.sleep_awake_hours,
         "resting_hr": row.resting_hr,
+    }
+
+
+def _garmin_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Serialise a GarminDailyMetrics row."""
+    return {
+        "date": row.date.isoformat() if row.date else None,
+        "body_battery_max": row.body_battery_max,
+        "body_battery_min": row.body_battery_min,
+        "stress_avg": row.stress_avg,
+        "resting_hr": row.resting_hr,
+        "sleep_duration_hours": row.sleep_duration_sec / 3600.0 if row.sleep_duration_sec else None,
+        "sleep_deep_hours": row.sleep_deep_sec / 3600.0 if row.sleep_deep_sec else None,
+        "sleep_rem_hours": row.sleep_rem_sec / 3600.0 if row.sleep_rem_sec else None,
+        "sleep_light_hours": row.sleep_light_sec / 3600.0 if row.sleep_light_sec else None,
+        "sleep_score": row.sleep_score,
+        "recovery_time_hours": row.recovery_time_hours,
+        "vo2max": row.vo2max,
     }

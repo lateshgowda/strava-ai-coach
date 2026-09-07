@@ -38,5 +38,6 @@ def init_db() -> None:
     from backend.models import profile         # noqa: F401
     from backend.models import health          # noqa: F401
     from backend.models import training_plan   # noqa: F401
+    from backend.models import garmin          # noqa: F401
 
     Base.metadata.create_all(bind=engine)

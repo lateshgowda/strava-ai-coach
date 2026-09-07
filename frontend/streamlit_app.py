@@ -170,6 +170,16 @@ def get_sleep_history(days: int = 14) -> List[Dict]:
     return result if isinstance(result, list) else []
 
 
+def get_garmin_daily(days: int = 14) -> List[Dict]:
+    result = _api_get(f"/garmin/daily?days={days}", timeout=15)
+    return result if isinstance(result, list) else []
+
+
+def get_garmin_sleep_history(days: int = 30) -> List[Dict]:
+    result = _api_get(f"/garmin/sleep-history?days={days}", timeout=15)
+    return result if isinstance(result, list) else []
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -617,8 +627,201 @@ def render_sidebar() -> None:
             except Exception:
                 st.sidebar.error("Failed to disconnect.")
 
+    # --- Garmin Connect sidebar section ---
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Garmin Connect**")
+    garmin_status = _api_get("/garmin/status") or {}
+    garmin_connected = garmin_status.get("connected", False)
+    garmin_email = garmin_status.get("email")
+
+    if garmin_connected:
+        st.sidebar.markdown(
+            f'<div class="success-box" style="font-size:13px">Garmin: <b>{garmin_email}</b></div>',
+            unsafe_allow_html=True,
+        )
+        g_days = st.sidebar.selectbox("Sync days", [7, 14, 30], key="garmin_sync_days", label_visibility="collapsed")
+        if st.sidebar.button("Sync Garmin Data", use_container_width=True):
+            with st.spinner("Syncing Garmin metrics…"):
+                gr = requests.post(f"{BACKEND_URL}/garmin/sync?days={g_days}", timeout=120)
+            if gr.status_code == 200:
+                res = gr.json()
+                st.sidebar.success(f"Synced {res.get('synced', 0)} days.")
+                if res.get("errors"):
+                    st.sidebar.warning(f"{len(res['errors'])} errors.")
+            else:
+                st.sidebar.error("Garmin sync failed.")
+        if st.sidebar.button("Disconnect Garmin", use_container_width=True):
+            requests.delete(f"{BACKEND_URL}/garmin/disconnect", timeout=10)
+            st.rerun()
+    else:
+        if "garmin_mfa_pending" not in st.session_state:
+            st.session_state["garmin_mfa_pending"] = False
+
+        g_email = st.sidebar.text_input("Garmin email", key="g_email", placeholder="email@example.com")
+        g_pass = st.sidebar.text_input("Garmin password", key="g_pass", type="password")
+        g_mfa = None
+        if st.session_state["garmin_mfa_pending"]:
+            g_mfa = st.sidebar.text_input("MFA / OTP code", key="g_mfa", placeholder="123456")
+        if st.sidebar.button("Connect Garmin", use_container_width=True, type="primary"):
+            if g_email and g_pass:
+                with st.spinner("Connecting to Garmin…"):
+                    body: Dict[str, Any] = {"email": g_email, "password": g_pass}
+                    if g_mfa:
+                        body["mfa_code"] = g_mfa
+                    cr = requests.post(f"{BACKEND_URL}/garmin/connect", json=body, timeout=60)
+                if cr.status_code == 200:
+                    result = cr.json()
+                    if result.get("status") == "mfa_required":
+                        st.session_state["garmin_mfa_pending"] = True
+                        st.sidebar.warning("MFA required — enter your one-time code above.")
+                    elif result.get("status") == "connected":
+                        st.session_state["garmin_mfa_pending"] = False
+                        st.sidebar.success("Garmin connected!")
+                        st.rerun()
+                else:
+                    st.sidebar.error(f"Failed: {cr.text[:200]}")
+            else:
+                st.sidebar.warning("Enter email and password.")
+
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Backend: {BACKEND_URL}")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Garmin
+# ---------------------------------------------------------------------------
+
+
+def _fmt_sleep_str(secs: Optional[int]) -> str:
+    if secs is None:
+        return "–"
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    return f"{h}h {m:02d}m"
+
+
+def render_garmin() -> None:
+    garmin_status = _api_get("/garmin/status") or {}
+    if not garmin_status.get("connected"):
+        st.info("Connect your Garmin account in the sidebar to see your daily metrics here.")
+        return
+
+    st.subheader("Garmin Daily Metrics")
+
+    daily = _api_get("/garmin/daily?days=14") or []
+
+    if not daily:
+        st.warning("No Garmin data synced yet — click **Sync Garmin Data** in the sidebar.")
+        return
+
+    # --- Chart: Body Battery + Resting HR ---
+    chart_dates = [d["date"] for d in reversed(daily)]
+    bb_vals = [d.get("body_battery_max") for d in reversed(daily)]
+    hr_vals = [d.get("resting_hr") for d in reversed(daily)]
+
+    import plotly.graph_objects as _go
+    fig = _go.Figure()
+    fig.add_trace(_go.Bar(
+        x=chart_dates, y=bb_vals,
+        name="Body Battery",
+        marker_color="rgba(56,178,172,0.7)",
+        yaxis="y",
+    ))
+    fig.add_trace(_go.Scatter(
+        x=chart_dates, y=hr_vals,
+        name="Resting HR",
+        mode="lines+markers",
+        line=dict(color="#FC4C02", width=2),
+        marker=dict(size=6),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        template="plotly_dark",
+        height=260,
+        margin=dict(l=0, r=0, t=10, b=30),
+        yaxis=dict(title="Body Battery", range=[0, 100], showgrid=False),
+        yaxis2=dict(title="Resting HR (bpm)", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        bargap=0.3,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Daily table (last 7 days) ---
+    st.markdown("**Last 7 Days**")
+    hdr = st.columns([1.4, 1.3, 1, 1.2, 1, 1])
+    hdr[0].markdown("**Date**")
+    hdr[1].markdown("**Body Battery**")
+    hdr[2].markdown("**Resting HR**")
+    hdr[3].markdown("**Sleep**")
+    hdr[4].markdown("**Stress**")
+    hdr[5].markdown("**VO2 Max**")
+
+    for row in daily[:7]:
+        cols = st.columns([1.4, 1.3, 1, 1.2, 1, 1])
+        d = row["date"]
+        bb_max = row.get("body_battery_max")
+        bb_min = row.get("body_battery_min")
+        bb_str = f"{bb_max}→{bb_min}" if bb_max is not None else "–"
+        rhr = row.get("resting_hr")
+        sleep_str = row.get("sleep_duration_str") or "–"
+        stress = row.get("stress_avg")
+        vo2 = row.get("vo2max")
+        cols[0].markdown(f"<div style='padding-top:5px'>{d}</div>", unsafe_allow_html=True)
+        cols[1].markdown(f"<div style='padding-top:5px'>{bb_str}</div>", unsafe_allow_html=True)
+        cols[2].markdown(f"<div style='padding-top:5px'>{rhr or '–'} bpm</div>", unsafe_allow_html=True)
+        cols[3].markdown(f"<div style='padding-top:5px'>{sleep_str}</div>", unsafe_allow_html=True)
+        cols[4].markdown(f"<div style='padding-top:5px'>{stress or '–'}</div>", unsafe_allow_html=True)
+        cols[5].markdown(f"<div style='padding-top:5px'>{f'{vo2:.1f}' if vo2 else '–'}</div>", unsafe_allow_html=True)
+
+    # --- Push workouts to watch ---
+    st.markdown("---")
+    st.subheader("Push FM Plan to Watch")
+
+    plan_status = _api_get("/plan/status") or {}
+    if plan_status.get("total_workouts", 0) == 0:
+        st.info("Import your FM Plan first (FM Plan tab).")
+        return
+
+    from datetime import date as _date
+    today_iso = _date.today().strftime("%G-W%V")
+
+    push_col1, push_col2 = st.columns([2, 1])
+    with push_col1:
+        st.markdown(f"Push this week's workouts ({today_iso}) to your Forerunner 645:")
+    with push_col2:
+        if st.button("Push This Week", type="primary", use_container_width=True):
+            with st.spinner("Pushing workouts to Garmin calendar…"):
+                pr = requests.post(f"{BACKEND_URL}/garmin/push-week/{today_iso}", timeout=60)
+            if pr.status_code == 200:
+                res = pr.json()
+                st.success(f"Pushed {res.get('pushed', 0)} workout(s) to your watch calendar.")
+                if res.get("errors"):
+                    for e in res["errors"]:
+                        st.warning(f"Error on {e['date']}: {e['error']}")
+            elif pr.status_code == 404:
+                st.warning("No workouts found for this week or Garmin not connected.")
+            else:
+                st.error(f"Push failed: {pr.text[:200]}")
+
+    # Individual workout push
+    week_data = _api_get(f"/plan/week/{today_iso}")
+    if week_data and week_data.get("workouts"):
+        st.markdown("**Individual workouts this week:**")
+        for w in week_data["workouts"]:
+            if w["status"] == "upcoming":
+                wcol1, wcol2 = st.columns([3, 1])
+                wcol1.markdown(
+                    f"{w['plan_date']} — {w['session_type']} {w['distance_km']:.1f}km"
+                    + (f" · _{w['details']}_" if w.get("details") else "")
+                )
+                if wcol2.button("Push", key=f"push_w_{w['id']}", use_container_width=True):
+                    with st.spinner("Pushing…"):
+                        pr2 = requests.post(f"{BACKEND_URL}/garmin/push-workout/{w['id']}", timeout=30)
+                    if pr2.status_code == 200:
+                        r2 = pr2.json()
+                        st.success(f"Pushed '{r2.get('name')}' to watch for {r2.get('scheduled')}.")
+                    else:
+                        st.error(f"Push failed: {pr2.text[:200]}")
 
 
 # ---------------------------------------------------------------------------
@@ -1140,10 +1343,13 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         )
     st.markdown("")
 
-    # --- Three gauges ---
-    col1, col2, col3 = st.columns(3)
+    # --- Gauges (3 base + optional Body Battery from Garmin) ---
+    garmin_today = data.get("garmin_today") or {}
+    body_battery = garmin_today.get("body_battery_max")
 
-    with col1:
+    gauge_cols = st.columns(4 if body_battery is not None else 3)
+
+    with gauge_cols[0]:
         fig = make_gauge(fatigue, "Fatigue Score", max_val=100,
                          green_threshold=35, red_threshold=70)
         st.plotly_chart(fig, use_container_width=True)
@@ -1154,7 +1360,7 @@ def render_fatigue(data: Dict[str, Any]) -> None:
             st.markdown('<div class="success-box">Low fatigue — well rested.</div>',
                         unsafe_allow_html=True)
 
-    with col2:
+    with gauge_cols[1]:
         fig = make_recovery_gauge(recovery)
         st.plotly_chart(fig, use_container_width=True)
         if recovery >= 65:
@@ -1164,7 +1370,7 @@ def render_fatigue(data: Dict[str, Any]) -> None:
             st.markdown('<div class="warning-box">Low recovery — consider an easy day or rest.</div>',
                         unsafe_allow_html=True)
 
-    with col3:
+    with gauge_cols[2]:
         fig = make_acwr_gauge(acwr)
         st.plotly_chart(fig, use_container_width=True)
         if acwr > 1.3:
@@ -1176,6 +1382,21 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         else:
             st.markdown('<div class="success-box">Sweet spot (0.8–1.3) — maintain current load.</div>',
                         unsafe_allow_html=True)
+
+    if body_battery is not None:
+        with gauge_cols[3]:
+            fig = make_gauge(body_battery, "Body Battery", max_val=100,
+                             green_threshold=70, red_threshold=30)
+            st.plotly_chart(fig, use_container_width=True)
+            if body_battery >= 70:
+                st.markdown('<div class="success-box">High energy reserve — great time to train.</div>',
+                            unsafe_allow_html=True)
+            elif body_battery < 30:
+                st.markdown('<div class="warning-box">Very low battery — prioritise sleep and rest.</div>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="metric-card">Body Battery: {body_battery}%</div>',
+                            unsafe_allow_html=True)
 
     # --- Load stats row ---
     st.markdown("---")
@@ -1193,14 +1414,32 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         )
         st.markdown("")
 
-    # --- Sleep & Recovery (Apple Health via iOS Shortcut) ---
+    # --- Sleep & Recovery (Apple Health first, Garmin fallback) ---
     st.markdown("---")
-    st.subheader("Last Night's Sleep & Recovery")
     today_health = data.get("today_health")
+    _garmin_td = data.get("garmin_today") or {}
+
+    # Merge: use Apple Health when available, Garmin as fallback
+    _sleep_src = "Apple Health"
     if today_health and any(today_health.get(k) for k in (
         "sleep_duration_hours", "sleep_deep_hours", "sleep_rem_hours", "resting_hr"
     )):
         h = today_health
+    elif _garmin_td.get("sleep_duration_hours"):
+        h = {
+            "sleep_duration_hours": _garmin_td.get("sleep_duration_hours"),
+            "sleep_deep_hours": _garmin_td.get("sleep_deep_hours"),
+            "sleep_rem_hours": _garmin_td.get("sleep_rem_hours"),
+            "sleep_core_hours": _garmin_td.get("sleep_light_hours"),
+            "sleep_awake_hours": None,
+            "resting_hr": _garmin_td.get("resting_hr"),
+        }
+        _sleep_src = "Garmin"
+    else:
+        h = None
+
+    st.subheader(f"Last Night's Sleep & Recovery {'(Garmin)' if _sleep_src == 'Garmin' else ''}")
+    if h:
         sleep_total = h.get("sleep_duration_hours")
         sleep_deep = h.get("sleep_deep_hours")
         sleep_rem = h.get("sleep_rem_hours")
@@ -1208,7 +1447,6 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         sleep_awake = h.get("sleep_awake_hours", 0) or 0
         rhr = h.get("resting_hr")
 
-        # Sleep metrics row
         hc1, hc2, hc3, hc4 = st.columns(4)
         if sleep_total:
             sleep_color = "normal" if sleep_total >= 7 else "inverse"
@@ -1228,7 +1466,7 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         # Sleep stages stacked bar (if stage data available)
         stages = {k: v for k, v in {
             "Deep": sleep_deep, "REM": sleep_rem,
-            "Core/Light": sleep_core, "Awake": sleep_awake,
+            "Core/Light": sleep_core, "Awake": sleep_awake if sleep_awake else None,
         }.items() if v}
         if len(stages) > 1:
             import plotly.graph_objects as go
@@ -1252,18 +1490,34 @@ def render_fatigue(data: Dict[str, Any]) -> None:
             )
             st.plotly_chart(fig_sleep, use_container_width=True)
 
-        # Readiness impact note
+        # Readiness impact note — show all Garmin penalties
         factors = data.get("readiness", {}).get("factors", {})
         sleep_pen = factors.get("sleep_penalty", 0)
         deep_pen = factors.get("deep_sleep_penalty", 0)
         rhr_pen = factors.get("resting_hr_penalty", 0)
-        total_health_penalty = sleep_pen + deep_pen + rhr_pen
-        if total_health_penalty > 0:
+        bb_pen = factors.get("body_battery_penalty", 0)
+        bb_bon = factors.get("body_battery_bonus", 0)
+        stress_pen = factors.get("stress_penalty", 0)
+        rt_pen = factors.get("recovery_time_penalty", 0)
+        total_penalty = sleep_pen + deep_pen + rhr_pen + bb_pen + stress_pen + rt_pen
+        total_bonus = bb_bon
+        net = total_bonus - total_penalty
+        if total_penalty > 0 or total_bonus > 0:
+            parts = []
+            if sleep_pen: parts.append(f"sleep: -{sleep_pen:.0f}")
+            if deep_pen: parts.append(f"deep sleep: -{deep_pen:.0f}")
+            if rhr_pen: parts.append(f"resting HR: -{rhr_pen:.0f}")
+            if bb_pen: parts.append(f"body battery: -{bb_pen:.0f}")
+            if bb_bon: parts.append(f"body battery bonus: +{bb_bon:.0f}")
+            if stress_pen: parts.append(f"stress: -{stress_pen:.0f}")
+            if rt_pen: parts.append(f"recovery time: -{rt_pen:.0f}")
+            color = "#F56565" if net < 0 else "#48BB78"
+            sign = f"{net:+.0f}"
             st.markdown(
-                f'<div style="background:rgba(245,101,101,0.08);border-left:4px solid #F56565;'
+                f'<div style="background:rgba(245,101,101,0.08);border-left:4px solid {color};'
                 f'border-radius:6px;padding:10px 14px;margin:6px 0;font-size:0.9em;">'
-                f'Sleep & recovery deducted <b>{total_health_penalty:.0f} points</b> from today\'s readiness score '
-                f'(sleep: -{sleep_pen:.0f}, deep sleep: -{deep_pen:.0f}, resting HR: -{rhr_pen:.0f})'
+                f'Wearable data adjusted readiness by <b>{sign} points</b> '
+                f'({", ".join(parts)})'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -1271,8 +1525,8 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         st.markdown(
             '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
             'border-radius:6px;padding:12px 16px;color:#A0AEC0;">'
-            'No sleep data for today yet. Set up the iOS Shortcut to automatically sync '
-            'your Garmin sleep data each morning and improve readiness accuracy.'
+            'No sleep data for today yet. Sync Garmin data or set up the iOS Shortcut to '
+            'automatically improve readiness accuracy.'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -1606,6 +1860,43 @@ def render_training_intelligence(data: Dict[str, Any]) -> None:
             st.caption("Insufficient HR+pace data (need 4+ eligible runs)")
 
     st.markdown("---")
+
+    # ── VO2 Max Trend (Garmin) ─────────────────────────────────────────────
+    vo2max_data = get_garmin_daily(days=90)
+    vo2max_rows = [r for r in vo2max_data if r.get("vo2max") is not None]
+    if vo2max_rows:
+        st.subheader("VO2 Max Trend (Garmin)")
+        df_vo2 = pd.DataFrame(vo2max_rows)[["date", "vo2max"]].copy()
+        df_vo2["date"] = pd.to_datetime(df_vo2["date"])
+        df_vo2 = df_vo2.sort_values("date").drop_duplicates("date")
+        latest_vo2 = df_vo2["vo2max"].iloc[-1]
+        col_v1, col_v2 = st.columns([3, 1])
+        with col_v1:
+            fig_vo2 = px.line(
+                df_vo2, x="date", y="vo2max",
+                template=PLOTLY_TEMPLATE,
+                labels={"vo2max": "VO2 Max (mL/kg/min)", "date": "Date"},
+                markers=True,
+                color_discrete_sequence=[COLOR_BLUE],
+            )
+            fig_vo2.add_hline(y=50, line_dash="dash", line_color="#48BB78",
+                              annotation_text="Elite (50+)", annotation_position="top right")
+            fig_vo2.add_hline(y=42, line_dash="dash", line_color="#ECC94B",
+                              annotation_text="Average (42)", annotation_position="bottom right")
+            fig_vo2.update_layout(height=220, margin=dict(l=40, r=20, t=30, b=40))
+            st.plotly_chart(fig_vo2, use_container_width=True)
+        with col_v2:
+            race_pred = data.get("race_predictions", {})
+            vo2_used = race_pred.get("vo2max_used")
+            st.metric("Current VO2 Max", f"{latest_vo2:.1f}", help="From Garmin Forerunner")
+            trend_dir = "improving" if len(df_vo2) > 1 and df_vo2["vo2max"].iloc[-1] > df_vo2["vo2max"].iloc[0] else "stable"
+            st.caption(_trend_badge(trend_dir))
+            if vo2_used:
+                mara = race_pred.get("predictions", {}).get("marathon", {})
+                if mara.get("source") == "vo2max estimate":
+                    st.caption(f"Marathon est: **{mara.get('time_str', '–')}**")
+                    st.caption("(VO2max VDOT estimate)")
+        st.markdown("---")
 
     # ── Long run analysis ─────────────────────────────────────────────────
     col_fade, col_cad = st.columns(2)
@@ -2033,22 +2324,31 @@ def render_profile() -> None:
 
 def render_sleep() -> None:
     st.subheader("Sleep & Health Sync")
-    st.caption("Data synced from Apple Health via your iOS Shortcut (Garmin → Apple Health → Shortcut → App)")
 
     history = get_sleep_history(days=30)
+    _garmin_sleep = None
 
-    # --- Sync status ---
+    # --- Sync status / Garmin fallback ---
     if not history:
-        st.markdown(
-            '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
-            'border-radius:6px;padding:14px 18px;">'
-            '<b>No sleep data synced yet.</b><br/>'
-            'Run your iOS Shortcut manually or wait for the 9 AM automation. '
-            'Once data arrives it will appear here.'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        return
+        # Try Garmin as fallback
+        garmin_history = get_garmin_sleep_history(days=30)
+        if garmin_history:
+            history = garmin_history
+            _garmin_sleep = True
+            st.caption("Showing Garmin sleep data (no Apple Health data synced yet)")
+        else:
+            st.markdown(
+                '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
+                'border-radius:6px;padding:14px 18px;">'
+                '<b>No sleep data synced yet.</b><br/>'
+                'Sync Garmin data or run your iOS Shortcut manually. '
+                'Once data arrives it will appear here.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            return
+    else:
+        st.caption("Data synced from Apple Health via your iOS Shortcut")
 
     # Most recent entry
     latest = history[0]
@@ -2116,9 +2416,14 @@ def render_sleep() -> None:
         c1, c2, c3 = st.columns(3)
         c1.metric("Average Sleep", f"{avg:.1f} h")
         c2.metric("Nights ≥ 7h", f"{nights_ok}/{len(sleep_rows)}")
-        c3.metric("Days Synced", len(history))
+        if _garmin_sleep and "sleep_score" in df.columns:
+            score_rows = df[df["sleep_score"].notna()]
+            avg_score = score_rows["sleep_score"].mean() if not score_rows.empty else None
+            c3.metric("Avg Sleep Score", f"{avg_score:.0f}/100" if avg_score else "–")
+        else:
+            c3.metric("Days Synced", len(history))
     else:
-        st.info("Sleep duration data not yet available — the Shortcut sleep query may need adjusting.")
+        st.info("Sleep duration data not yet available — sync Garmin or run the iOS Shortcut.")
 
     # --- Sleep stages stacked bar ---
     stage_rows = df[df[["sleep_deep_hours", "sleep_rem_hours", "sleep_core_hours"]].notna().any(axis=1)]
@@ -2605,7 +2910,15 @@ def main() -> None:
                 hm_pred = race_pred.get("predictions", {}).get("half_marathon", {}).get("time_str", "–")
                 traj = race_pred.get("fitness_trajectory", "stable")
                 traj_icon = {"improving": "📈", "declining": "📉", "stable": "➡️"}.get(traj, "➡️")
-                bc1, bc2, bc3, bc4 = st.columns(4)
+                # Check for today's Garmin body battery
+                garmin_today = _api_get("/garmin/daily?days=1") or []
+                bb_today = garmin_today[0].get("body_battery_max") if garmin_today else None
+
+                if bb_today is not None:
+                    bc1, bc2, bc3, bc4, bc5 = st.columns(5)
+                    bc5.metric("Body Battery", f"{bb_today}%", delta_color="off")
+                else:
+                    bc1, bc2, bc3, bc4 = st.columns(4)
                 bc1.metric("Today's Readiness", f"{r_score:.0f}/100", delta=r_label, delta_color="off")
                 bc2.metric("Injury Risk", i_label, delta_color="off")
                 bc3.metric("HM Projection", hm_pred)
@@ -2616,8 +2929,9 @@ def main() -> None:
             render_best_efforts()
 
     # Tabs
-    tab_latest, tab_trends, tab_be, tab_ai, tab_fatigue, tab_sleep, tab_long, tab_all, tab_intel, tab_workout, tab_plan, tab_profile = st.tabs([
+    tab_latest, tab_garmin, tab_trends, tab_be, tab_ai, tab_fatigue, tab_sleep, tab_long, tab_all, tab_intel, tab_workout, tab_plan, tab_profile = st.tabs([
         "Latest Run",
+        "Garmin",
         "Trends",
         "Best Efforts",
         "AI Coach",
@@ -2633,6 +2947,9 @@ def main() -> None:
 
     with tab_latest:
         render_latest_run(data)
+
+    with tab_garmin:
+        render_garmin()
 
     with tab_trends:
         render_trends(data)

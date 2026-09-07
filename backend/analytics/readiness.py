@@ -79,6 +79,9 @@ def compute_readiness(
     sleep_deep_hours: float | None = None,
     resting_hr: int | None = None,
     baseline_resting_hr: int | None = None,
+    body_battery_max: int | None = None,
+    recovery_time_hours: int | None = None,
+    stress_avg: int | None = None,
 ) -> Dict[str, Any]:
     """
     Compute a 0–100 readiness score and a tiered recommendation.
@@ -92,10 +95,13 @@ def compute_readiness(
     consecutive_training_days : unbroken training streak
     recovery_debt          : (ATL-CTL)/CTL — positive = accumulated debt
     overreaching           : boolean flag from TrainingStateEngine
-    sleep_hours            : last night's total sleep in hours (from Apple Health)
+    sleep_hours            : last night's total sleep in hours (from Apple Health or Garmin)
     sleep_deep_hours       : deep/slow-wave sleep in hours
     resting_hr             : morning resting HR (bpm)
     baseline_resting_hr    : athlete's typical resting HR (from profile)
+    body_battery_max       : Garmin Body Battery peak for the day (0–100)
+    recovery_time_hours    : Garmin-estimated recovery time remaining (hours)
+    stress_avg             : Garmin average stress level for the day (0–100)
     """
     # Base: map recovery score (0-100) → start score (55-100)
     score = 55.0 + recovery_score * 0.45
@@ -169,6 +175,45 @@ def compute_readiness(
             resting_hr_penalty = 2.0
         score -= resting_hr_penalty
 
+    # ------------------------------------------------------------------
+    # Body Battery (Garmin) — bonus for high, penalty for low
+    # ------------------------------------------------------------------
+    body_battery_penalty = 0.0
+    body_battery_bonus = 0.0
+    if body_battery_max is not None:
+        if body_battery_max < 30:
+            body_battery_penalty = 15.0
+        elif body_battery_max < 50:
+            body_battery_penalty = 8.0
+        elif body_battery_max >= 70:
+            body_battery_bonus = 8.0
+    score -= body_battery_penalty
+    score += body_battery_bonus
+
+    # ------------------------------------------------------------------
+    # Garmin recovery time remaining
+    # ------------------------------------------------------------------
+    recovery_time_penalty = 0.0
+    if recovery_time_hours is not None and recovery_time_hours > 0:
+        if recovery_time_hours > 48:
+            recovery_time_penalty = 10.0
+        elif recovery_time_hours > 24:
+            recovery_time_penalty = 5.0
+        elif recovery_time_hours > 12:
+            recovery_time_penalty = 2.0
+    score -= recovery_time_penalty
+
+    # ------------------------------------------------------------------
+    # Stress average (Garmin)
+    # ------------------------------------------------------------------
+    stress_penalty = 0.0
+    if stress_avg is not None:
+        if stress_avg > 70:
+            stress_penalty = 8.0
+        elif stress_avg > 50:
+            stress_penalty = 4.0
+    score -= stress_penalty
+
     # Overreaching hard cap
     if overreaching:
         score = min(score, 30.0)
@@ -203,6 +248,16 @@ def compute_readiness(
     if resting_hr is not None:
         factors["resting_hr"] = resting_hr
         factors["resting_hr_penalty"] = round(resting_hr_penalty, 1)
+    if body_battery_max is not None:
+        factors["body_battery_max"] = body_battery_max
+        factors["body_battery_penalty"] = round(body_battery_penalty, 1)
+        factors["body_battery_bonus"] = round(body_battery_bonus, 1)
+    if recovery_time_hours is not None:
+        factors["recovery_time_hours"] = recovery_time_hours
+        factors["recovery_time_penalty"] = round(recovery_time_penalty, 1)
+    if stress_avg is not None:
+        factors["stress_avg"] = stress_avg
+        factors["stress_penalty"] = round(stress_penalty, 1)
 
     return {
         "readiness_score": score,

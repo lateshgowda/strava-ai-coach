@@ -2,7 +2,8 @@
 Enhanced race prediction engine.
 
 Uses the Riegel endurance formula as the base, then applies fitness trajectory
-modifiers derived from HR efficiency, pace efficiency, and consistency trends.
+modifiers derived from HR efficiency, pace efficiency, consistency trends, and
+VO2 max (from Garmin) for calibrated marathon projections.
 
 Produces:
 - Projected finish times for 5K, 10K, HM, Marathon
@@ -12,6 +13,44 @@ Produces:
 from __future__ import annotations
 import math
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------------
+# VO2max → marathon time lookup (Jack Daniels VDOT table, seconds)
+# ---------------------------------------------------------------------------
+_VDOT_MARATHON: list[tuple[float, float]] = [
+    (28, 5 * 3600 + 29 * 60 + 39),
+    (30, 5 * 3600 + 10 * 60 + 53),
+    (32, 4 * 3600 + 54 * 60 + 6),
+    (34, 4 * 3600 + 38 * 60 + 50),
+    (36, 4 * 3600 + 25 * 60 + 0),
+    (38, 4 * 3600 + 12 * 60 + 17),
+    (40, 4 * 3600 + 0 * 60 + 32),
+    (42, 3 * 3600 + 49 * 60 + 41),
+    (44, 3 * 3600 + 39 * 60 + 38),
+    (46, 3 * 3600 + 30 * 60 + 18),
+    (48, 3 * 3600 + 21 * 60 + 35),
+    (50, 3 * 3600 + 13 * 60 + 23),
+    (52, 3 * 3600 + 5 * 60 + 42),
+    (55, 2 * 3600 + 54 * 60 + 29),
+    (60, 2 * 3600 + 38 * 60 + 0),
+    (65, 2 * 3600 + 23 * 60 + 22),
+    (70, 2 * 3600 + 10 * 60 + 20),
+]
+
+
+def _vo2max_to_marathon_sec(vo2max: float) -> float:
+    """Interpolate marathon time (seconds) from VO2max using Daniels VDOT table."""
+    vdots = [v for v, _ in _VDOT_MARATHON]
+    times = [t for _, t in _VDOT_MARATHON]
+    if vo2max <= vdots[0]:
+        return times[0]
+    if vo2max >= vdots[-1]:
+        return times[-1]
+    for i in range(len(vdots) - 1):
+        if vdots[i] <= vo2max <= vdots[i + 1]:
+            frac = (vo2max - vdots[i]) / (vdots[i + 1] - vdots[i])
+            return times[i] + frac * (times[i + 1] - times[i])
+    return float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +85,7 @@ def compute_race_predictions(
     hr_efficiency_trend: str,
     pace_efficiency_trend: str,
     acwr: float,
+    vo2max: float | None = None,
 ) -> Dict[str, Any]:
     """
     Compute race-time projections with confidence scores and fitness trajectory.
@@ -63,6 +103,7 @@ def compute_race_predictions(
     hr_efficiency_trend    : 'improving' | 'stable' | 'declining'
     pace_efficiency_trend  : 'improving' | 'stable' | 'declining'
     acwr                   : current acute:chronic workload ratio
+    vo2max                 : VO2 max from Garmin (mL/kg/min) — used to calibrate marathon estimate
 
     Returns
     -------
@@ -93,6 +134,17 @@ def compute_race_predictions(
     if acwr > 1.3:
         modifier += 0.015
 
+    # VO2 max fitness adjustment (Garmin data)
+    if vo2max is not None:
+        if vo2max >= 52:
+            modifier -= 0.020
+        elif vo2max >= 47:
+            modifier -= 0.010
+        elif vo2max < 38:
+            modifier += 0.020
+        elif vo2max < 42:
+            modifier += 0.010
+
     modifier = max(-0.05, min(0.05, modifier))  # cap at ±5%
 
     # ── Confidence score ──────────────────────────────────────────────────
@@ -103,6 +155,9 @@ def compute_race_predictions(
         + aerobic_fitness_score * 0.30
         + freshness * 0.30
     )
+    # VO2 max boosts confidence (adds up to 8 points when available)
+    if vo2max is not None:
+        confidence = min(100.0, confidence + 8.0)
     confidence = round(min(100.0, max(0.0, confidence)), 0)
 
     # ── Fitness trajectory ─────────────────────────────────────────────────
@@ -144,6 +199,13 @@ def compute_race_predictions(
                         source = f"projected from {src_label}"
                         break
 
+        # 3. For marathon: fall back to VO2max VDOT estimate when no PR/projection is available
+        if base_sec is None and label == "marathon" and vo2max is not None:
+            vo2_est = _vo2max_to_marathon_sec(vo2max)
+            if not math.isnan(vo2_est):
+                base_sec = vo2_est
+                source = "vo2max estimate"
+
         if base_sec is None or math.isnan(base_sec):
             predictions[label] = {
                 "time_str": "–",
@@ -161,7 +223,10 @@ def compute_race_predictions(
         if source and "projected" in str(source):
             dist_confidence *= 0.80   # less confident for projections
         if label == "marathon":
-            dist_confidence *= 0.75   # marathon is harder to predict
+            if source == "vo2max estimate":
+                dist_confidence *= 0.65  # VO2max estimate less certain than Riegel
+            else:
+                dist_confidence *= 0.75  # marathon is harder to predict
 
         predictions[label] = {
             "time_str": format_duration(int(adjusted_sec)),
@@ -176,6 +241,7 @@ def compute_race_predictions(
         "overall_confidence": int(confidence),
         "fitness_trajectory": trajectory,
         "trajectory_modifier_pct": round(modifier * 100, 1),
+        "vo2max_used": vo2max,
     }
 
 

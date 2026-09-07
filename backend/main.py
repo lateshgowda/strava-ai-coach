@@ -960,6 +960,191 @@ async def get_best_efforts_yearly(db: Session = Depends(get_db)) -> Dict[str, An
     return {"years": result_years}
 
 
+# ---------------------------------------------------------------------------
+# Garmin Connect endpoints
+# ---------------------------------------------------------------------------
+
+from backend.models.garmin import GarminDailyMetrics, GarminToken  # noqa: E402
+import backend.services.garmin_service as garmin_svc  # noqa: E402
+
+
+class GarminConnectBody(BaseModel):
+    email: str
+    password: str
+    mfa_code: Optional[str] = None
+
+
+@app.post("/garmin/connect")
+async def garmin_connect(body: GarminConnectBody, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    result = garmin_svc.connect(body.email, body.password, body.mfa_code)
+    if result["status"] == "mfa_required":
+        return {"status": "mfa_required"}
+    # Upsert single token row
+    existing = db.query(GarminToken).first()
+    if existing:
+        existing.email = body.email
+        existing.tokenstore = result["tokenstore"]
+        existing.updated_at = __import__("datetime").datetime.utcnow()
+    else:
+        db.add(GarminToken(email=body.email, tokenstore=result["tokenstore"]))
+    db.commit()
+    return {"status": "connected", "email": body.email}
+
+
+@app.get("/garmin/status")
+async def garmin_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    row = db.query(GarminToken).first()
+    return {"connected": row is not None, "email": row.email if row else None}
+
+
+@app.post("/garmin/sync")
+async def garmin_sync(
+    days: int = Query(7, ge=1, le=90),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    row = db.query(GarminToken).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Garmin not connected")
+    return garmin_svc.sync_recent(db, row.tokenstore, days)
+
+
+@app.get("/garmin/daily")
+async def garmin_daily(
+    days: int = Query(14, ge=1, le=90),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=days)
+    rows = (
+        db.query(GarminDailyMetrics)
+        .filter(GarminDailyMetrics.date >= cutoff)
+        .order_by(GarminDailyMetrics.date.desc())
+        .all()
+    )
+
+    def _fmt_sleep(secs: Optional[int]) -> Optional[str]:
+        if secs is None:
+            return None
+        h = secs // 3600
+        m = (secs % 3600) // 60
+        return f"{h}h {m:02d}m"
+
+    result = []
+    for r in rows:
+        result.append({
+            "date": r.date.isoformat(),
+            "body_battery_max": r.body_battery_max,
+            "body_battery_min": r.body_battery_min,
+            "stress_avg": r.stress_avg,
+            "resting_hr": r.resting_hr,
+            "sleep_duration_str": _fmt_sleep(r.sleep_duration_sec),
+            "sleep_duration_sec": r.sleep_duration_sec,
+            "sleep_deep_sec": r.sleep_deep_sec,
+            "sleep_rem_sec": r.sleep_rem_sec,
+            "sleep_light_sec": r.sleep_light_sec,
+            "sleep_score": r.sleep_score,
+            "recovery_time_hours": r.recovery_time_hours,
+            "vo2max": r.vo2max,
+        })
+    return result
+
+
+@app.post("/garmin/push-workout/{workout_id}")
+async def garmin_push_workout(workout_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    from backend.models.training_plan import TrainingPlan
+    plan = db.query(TrainingPlan).filter(TrainingPlan.id == workout_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Workout not found")
+    token = db.query(GarminToken).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Garmin not connected")
+    api = garmin_svc.get_client(token.tokenstore)
+    plan_dict = {
+        "plan_date": plan.plan_date.isoformat(),
+        "distance_km": plan.distance_km,
+        "session_type": plan.session_type,
+        "details": plan.details,
+    }
+    return garmin_svc.push_workout(api, plan_dict)
+
+
+@app.post("/garmin/push-week/{iso_week}")
+async def garmin_push_week(iso_week: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    from backend.models.training_plan import TrainingPlan
+    workouts = (
+        db.query(TrainingPlan)
+        .filter(TrainingPlan.iso_week == iso_week)
+        .order_by(TrainingPlan.plan_date)
+        .all()
+    )
+    if not workouts:
+        raise HTTPException(status_code=404, detail="No workouts for this week")
+    token = db.query(GarminToken).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Garmin not connected")
+    api = garmin_svc.get_client(token.tokenstore)
+    pushed = []
+    errors = []
+    for w in workouts:
+        plan_dict = {
+            "plan_date": w.plan_date.isoformat(),
+            "distance_km": w.distance_km,
+            "session_type": w.session_type,
+            "details": w.details,
+        }
+        try:
+            r = garmin_svc.push_workout(api, plan_dict)
+            pushed.append(r)
+        except Exception as exc:
+            errors.append({"date": w.plan_date.isoformat(), "error": str(exc)})
+    return {"pushed": len(pushed), "workouts": pushed, "errors": errors}
+
+
+@app.delete("/garmin/disconnect")
+async def garmin_disconnect(db: Session = Depends(get_db)) -> Dict[str, str]:
+    db.query(GarminToken).delete()
+    db.commit()
+    return {"status": "disconnected"}
+
+
+@app.get("/garmin/sleep-history")
+async def garmin_sleep_history(
+    days: int = Query(30, ge=1, le=90),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """
+    Return Garmin sleep data formatted like Apple Health history rows.
+    Used by the Sleep tab as a fallback when no Apple Health data is present.
+    """
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=days)
+    rows = (
+        db.query(GarminDailyMetrics)
+        .filter(GarminDailyMetrics.date >= cutoff)
+        .filter(GarminDailyMetrics.sleep_duration_sec.isnot(None))
+        .order_by(GarminDailyMetrics.date.desc())
+        .all()
+    )
+    result = []
+    for r in rows:
+        sleep_total = r.sleep_duration_sec / 3600.0 if r.sleep_duration_sec else None
+        sleep_deep = r.sleep_deep_sec / 3600.0 if r.sleep_deep_sec else None
+        sleep_rem = r.sleep_rem_sec / 3600.0 if r.sleep_rem_sec else None
+        sleep_light = r.sleep_light_sec / 3600.0 if r.sleep_light_sec else None
+        result.append({
+            "date": r.date.isoformat(),
+            "sleep_duration_hours": round(sleep_total, 2) if sleep_total else None,
+            "sleep_deep_hours": round(sleep_deep, 2) if sleep_deep else None,
+            "sleep_rem_hours": round(sleep_rem, 2) if sleep_rem else None,
+            "sleep_core_hours": round(sleep_light, 2) if sleep_light else None,
+            "sleep_awake_hours": None,
+            "sleep_score": r.sleep_score,
+            "resting_hr": r.resting_hr,
+            "source": "garmin",
+        })
+    return result
+
+
 @app.delete("/ai/chat/memory")
 async def clear_chat_memory_endpoint(db: Session = Depends(get_db)) -> Dict[str, str]:
     """Clear all persistent chat history."""
