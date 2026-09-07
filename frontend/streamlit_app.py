@@ -165,6 +165,11 @@ def get_weekly_summary() -> str:
     return result.get("summary", "No summary available.") if result else "Failed to get summary."
 
 
+def get_sleep_history(days: int = 14) -> List[Dict]:
+    result = _api_get(f"/health-data/history?days={days}", timeout=15)
+    return result if isinstance(result, list) else []
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -617,6 +622,175 @@ def render_sidebar() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Best Efforts section (shown on main dashboard)
+# ---------------------------------------------------------------------------
+
+_MEDAL = ["🥇", "🥈", "🥉"]
+
+
+def render_best_efforts() -> None:
+    data = _api_get("/best-efforts")
+    if not data:
+        return
+
+    st.markdown("---")
+    st.subheader("Best Efforts")
+
+    buckets = [
+        ("5k",      "5 K"),
+        ("10k",     "10 K"),
+        ("21k",     "Half Marathon"),
+        ("longest", "Longest Runs"),
+    ]
+
+    last = data.get("last", {})
+
+    cols = st.columns(4)
+    for col, (key, label) in zip(cols, buckets):
+        efforts: List[Dict[str, Any]] = data.get(key, [])
+        last_effort: Optional[Dict[str, Any]] = last.get(key) if key != "5k" else None
+        with col:
+            st.markdown(f"**{label}**")
+            if not efforts:
+                st.caption("No data yet")
+                continue
+
+            # Top-3 best efforts
+            rows_html = ""
+            for rank, e in enumerate(efforts):
+                medal = _MEDAL[rank] if rank < 3 else f"#{rank+1}"
+                dist_str = f"{e['distance_km']:.1f} km" if key == "longest" else ""
+                pace_str = f"{e['pace']}/km" if e.get("pace") else ""
+                hr_str = f" · {e['avg_hr']} bpm" if e.get("avg_hr") else ""
+                sub = " · ".join(filter(None, [dist_str, pace_str])) + hr_str
+                rows_html += (
+                    f"<div style='padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08)'>"
+                    f"<span style='font-size:18px'>{medal}</span> "
+                    f"<span style='font-size:17px;font-weight:700'>{e['time_str']}</span><br>"
+                    f"<span style='font-size:12px;color:#a0aec0'>{sub}</span><br>"
+                    f"<span style='font-size:11px;color:#718096'>{e['date']}</span>"
+                    f"</div>"
+                )
+            st.markdown(rows_html, unsafe_allow_html=True)
+
+            # Last effort row
+            st.markdown(
+                "<div style='margin-top:10px;font-size:11px;color:#718096;text-transform:uppercase;"
+                "letter-spacing:.06em'>Last</div>",
+                unsafe_allow_html=True,
+            )
+            if last_effort:
+                e = last_effort
+                dist_str = f"{e['distance_km']:.1f} km" if key == "longest" else f"{e['distance_km']:.1f} km"
+                pace_str = f"{e['pace']}/km" if e.get("pace") else ""
+                hr_str = f" · {e['avg_hr']} bpm" if e.get("avg_hr") else ""
+                sub = " · ".join(filter(None, [dist_str, pace_str])) + hr_str
+                st.markdown(
+                    f"<div style='padding:6px 0'>"
+                    f"<span style='font-size:16px;font-weight:600'>{e['time_str']}</span><br>"
+                    f"<span style='font-size:12px;color:#a0aec0'>{sub}</span><br>"
+                    f"<span style='font-size:11px;color:#718096'>{e['date']}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown("<span style='color:#718096;font-size:13px'>–</span>", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Tab: Best Efforts (year-by-year)
+# ---------------------------------------------------------------------------
+
+_BE_COLS = [
+    ("5k",      "5 K"),
+    ("10k",     "10 K"),
+    ("21k",     "Half Marathon"),
+    ("longest", "Longest"),
+]
+
+
+def _parse_time_secs(time_str: str) -> int:
+    """Convert 'MM:SS' or 'H:MM:SS' to total seconds for comparison."""
+    try:
+        parts = [int(p) for p in time_str.split(":")]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except Exception:
+        return 999999
+
+
+def _be_cell(e: Optional[Dict[str, Any]], show_dist: bool = False, is_pr: bool = False) -> str:
+    if not e:
+        return "<span style='color:#4a5568'>–</span>"
+    dist_str = f"{e['distance_km']:.1f} km · " if show_dist else ""
+    pace_str = f"{e['pace']}/km" if e.get("pace") else ""
+    hr_str = f" · {e['avg_hr']} bpm" if e.get("avg_hr") else ""
+    sub = dist_str + pace_str + hr_str
+    pr_badge = " 🏆" if is_pr else ""
+    bg = "background:rgba(236,201,75,0.12);border-left:3px solid #ECC94B;border-radius:6px;padding:6px 10px;" if is_pr else "padding:6px 0;"
+    time_color = "#ECC94B" if is_pr else "inherit"
+    return (
+        f"<div style='{bg}'>"
+        f"<span style='font-size:15px;font-weight:700;color:{time_color}'>{e['time_str']}{pr_badge}</span><br>"
+        f"<span style='font-size:11px;color:#a0aec0'>{sub}</span><br>"
+        f"<span style='font-size:11px;color:#718096'>{e['date']}</span>"
+        f"</div>"
+    )
+
+
+def render_best_efforts_tab() -> None:
+    data = _api_get("/best-efforts/yearly")
+    if not data:
+        st.info("No activity data yet.")
+        return
+
+    years = data.get("years", [])
+    if not years:
+        st.info("No activity data yet.")
+        return
+
+    # Find PR year per column
+    pr_years: Dict[str, Optional[int]] = {}
+    for key, _ in _BE_COLS:
+        best_val = None
+        best_yr = None
+        for row in years:
+            e = row.get(key)
+            if not e:
+                continue
+            if key == "longest":
+                val = e.get("distance_km", 0.0)
+                if best_val is None or val > best_val:
+                    best_val = val
+                    best_yr = row["year"]
+            else:
+                val = _parse_time_secs(e.get("time_str", ""))
+                if best_val is None or val < best_val:
+                    best_val = val
+                    best_yr = row["year"]
+        pr_years[key] = best_yr
+
+    # Header row
+    hcols = st.columns([1, 2, 2, 2, 2])
+    hcols[0].markdown("**Year**")
+    for i, (_, label) in enumerate(_BE_COLS):
+        hcols[i + 1].markdown(f"**{label}**")
+
+    st.markdown("<hr style='margin:4px 0;border-color:rgba(255,255,255,0.1)'>", unsafe_allow_html=True)
+
+    for row in years:
+        yr = row["year"]
+        rcols = st.columns([1, 2, 2, 2, 2])
+        rcols[0].markdown(f"<div style='padding-top:8px;font-weight:600'>{yr}</div>", unsafe_allow_html=True)
+        for i, (key, _) in enumerate(_BE_COLS):
+            show_dist = key == "longest"
+            is_pr = pr_years.get(key) == yr
+            rcols[i + 1].markdown(_be_cell(row.get(key), show_dist=show_dist, is_pr=is_pr), unsafe_allow_html=True)
+        st.markdown("<hr style='margin:2px 0;border-color:rgba(255,255,255,0.06)'>", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Tab: Latest Run
 # ---------------------------------------------------------------------------
 
@@ -676,85 +850,161 @@ def render_latest_run(data: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_weekly(data: Dict[str, Any]) -> None:
-    weekly = data.get("weekly", [])
+def render_trends(_data: Dict[str, Any]) -> None:
+    """Unified Trends tab — Strava-style area chart + 6 metric summary cards."""
 
-    if not weekly:
-        st.info("No weekly data yet — sync activities to see your mileage.")
+    _METRICS = [
+        ("distance_km",     "Distance",   "km",  lambda v: f"{v:.1f}"),
+        ("avg_pace",        "Avg Pace",   "/km", lambda v: format_pace(v)),
+        ("activities",      "Activities", "",    lambda v: str(int(v))),
+        ("elevation_m",     "Elevation",  "m",   lambda v: f"{v:.0f}"),
+        ("moving_time_sec", "Time Spent", "",    lambda v: format_duration(v)),
+        ("avg_hr",          "Avg HR",     "bpm", lambda v: f"{v:.0f}"),
+    ]
+
+    # ── Period toggle ────────────────────────────────────────────────────────
+    period_label = st.radio(
+        "",
+        ["Weeks", "Months", "Years"],
+        horizontal=True,
+        key="trend_period",
+        label_visibility="collapsed",
+    )
+    period_key = {"Weeks": "week", "Months": "month", "Years": "year"}[period_label]
+    period_singular = {"Weeks": "Week", "Months": "Month", "Years": "Year"}[period_label]
+
+    # ── Fetch data ───────────────────────────────────────────────────────────
+    try:
+        resp = requests.get(f"{BACKEND_URL}/trends", params={"period": period_key}, timeout=10)
+        trends: List[Dict] = resp.json()
+    except Exception as exc:
+        st.error(f"Could not load trends data: {exc}")
         return
 
-    st.plotly_chart(make_weekly_bar(weekly), use_container_width=True)
-
-    st.subheader("Recent Weeks")
-    df = pd.DataFrame(weekly)
-    if not df.empty:
-        display_cols = {
-            "week": "Week",
-            "distance_km": "Distance (km)",
-            "run_count": "Runs",
-            "avg_pace": "Avg Pace (min/km)",
-            "avg_hr": "Avg HR",
-        }
-        df_display = df[[c for c in display_cols if c in df.columns]].copy()
-        df_display.rename(columns=display_cols, inplace=True)
-        if "Distance (km)" in df_display.columns:
-            df_display["Distance (km)"] = df_display["Distance (km)"].round(1)
-        if "Avg Pace (min/km)" in df_display.columns:
-            df_display["Avg Pace (min/km)"] = df_display["Avg Pace (min/km)"].apply(
-                lambda x: format_pace(x) if pd.notna(x) else "–"
-            )
-        if "Avg HR" in df_display.columns:
-            df_display["Avg HR"] = df_display["Avg HR"].apply(
-                lambda x: f"{x:.0f}" if pd.notna(x) else "–"
-            )
-        st.dataframe(df_display.sort_values("Week", ascending=False), use_container_width=True)
-
-
-# ---------------------------------------------------------------------------
-# Tab: Monthly Trends
-# ---------------------------------------------------------------------------
-
-
-def render_monthly(data: Dict[str, Any]) -> None:
-    monthly = data.get("monthly", [])
-    pace_trend = data.get("pace_trend", [])
-    hr_trend = data.get("hr_trend", [])
-
-    if not monthly and not pace_trend and not hr_trend:
-        st.info("No trend data yet — sync activities to see your trends.")
+    if not trends:
+        st.info("No running data yet — sync your Strava activities first.")
         return
 
-    st.plotly_chart(make_monthly_chart(monthly), use_container_width=True)
+    current = trends[-1]
+    previous = trends[-2] if len(trends) >= 2 else {}
 
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.plotly_chart(make_pace_trend(pace_trend), use_container_width=True)
-    with col_right:
-        st.plotly_chart(make_hr_trend(hr_trend), use_container_width=True)
+    # ── Metric selector (pill row) ───────────────────────────────────────────
+    if "trend_metric" not in st.session_state:
+        st.session_state["trend_metric"] = "distance_km"
 
-    cadence_trend = data.get("cadence_trend", [])
-    if cadence_trend:
-        st.plotly_chart(make_cadence_trend(cadence_trend), use_container_width=True)
+    sel_cols = st.columns(len(_METRICS))
+    for i, (key, label, unit, _) in enumerate(_METRICS):
+        with sel_cols[i]:
+            is_sel = st.session_state["trend_metric"] == key
+            if st.button(
+                label,
+                key=f"tmbtn_{key}_{period_key}",
+                type="primary" if is_sel else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["trend_metric"] = key
+                st.rerun()
 
-    # Trend summary box
-    trend = data.get("recent_trend", {})
-    if trend:
-        st.markdown("---")
-        st.subheader("4-Week Trend Summary")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(
-            "Weekly km (last 4w)",
-            f"{trend.get('avg_weekly_km_last4w', 0):.1f} km",
-            delta=f"{trend.get('trend_pct', 0):+.1f}%",
-        )
-        c2.metric(
-            "Weekly km (prev 4w)",
-            f"{trend.get('avg_weekly_km_prev4w', 0):.1f} km",
-        )
-        avg_pace = trend.get("avg_pace_last4w")
-        c3.metric("Avg Pace", format_pace(avg_pace))
-        avg_hr = trend.get("avg_hr_last4w")
-        c4.metric("Avg HR", f"{avg_hr:.0f} bpm" if avg_hr else "–")
+    st.markdown("")
+
+    # ── Area chart ───────────────────────────────────────────────────────────
+    sel_key = st.session_state["trend_metric"]
+    sel_meta = next(m for m in _METRICS if m[0] == sel_key)
+    sel_label, sel_unit, sel_fmt = sel_meta[1], sel_meta[2], sel_meta[3]
+
+    xs = [t["display"] for t in trends]
+    ys = [t.get(sel_key) for t in trends]
+    cur_idx = next((i for i, t in enumerate(trends) if t.get("is_current")), len(trends) - 1)
+
+    valid_ys = [v for v in ys if v is not None]
+    avg_val = sum(valid_ys) / len(valid_ys) if valid_ys else None
+    avg_str = (
+        f"{len(trends)}-{period_singular} Avg: {sel_fmt(avg_val)} {sel_unit}".strip()
+        if avg_val is not None else ""
+    )
+
+    import plotly.graph_objects as _go
+
+    # Open circle for past periods, filled dark circle for current
+    marker_colors = ["#1a202c" if i == cur_idx else "rgba(0,0,0,0)" for i in range(len(xs))]
+    marker_sizes = [10 if i == cur_idx else 7 for i in range(len(xs))]
+
+    fig = _go.Figure()
+    fig.add_trace(_go.Scatter(
+        x=xs,
+        y=ys,
+        mode="lines+markers",
+        line=dict(color="#38b2ac", width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(56,178,172,0.12)",
+        marker=dict(
+            size=marker_sizes,
+            color=marker_colors,
+            line=dict(color="#38b2ac", width=2),
+        ),
+        hovertemplate=f"%{{x}}<br>{sel_label}: %{{y:.1f}} {sel_unit}<extra></extra>",
+    ))
+
+    if cur_idx < len(xs):
+        fig.add_vline(x=xs[cur_idx], line_width=1.5, line_color="rgba(45,55,72,0.8)")
+
+    fig.update_layout(
+        title=dict(
+            text=f"<b style='font-size:17px'>{sel_label}</b>"
+                 + (f"<br><span style='font-size:12px;color:#718096'>{avg_str}</span>" if avg_str else ""),
+            x=0,
+            xanchor="left",
+            font=dict(color="#e2e8f0"),
+        ),
+        height=300,
+        margin=dict(l=0, r=16, t=56, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#ccc", size=11),
+        showlegend=False,
+        xaxis=dict(showgrid=False, tickangle=-30 if period_key == "week" else 0),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)", zeroline=False),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── 6 metric summary cards ───────────────────────────────────────────────
+    card_cols = st.columns(6)
+    for i, (key, label, unit, fmt) in enumerate(_METRICS):
+        curr_val = current.get(key)
+        prev_val = previous.get(key)
+
+        if curr_val is not None and prev_val is not None and prev_val != 0:
+            if key == "avg_pace":
+                improved = curr_val < prev_val
+            else:
+                improved = curr_val >= prev_val
+            arrow = "↗" if improved else "↘"
+            arrow_color = "#48bb78" if improved else "#fc8181"
+        else:
+            arrow = ""
+            arrow_color = "#aaa"
+
+        curr_str = (fmt(curr_val) + (f" {unit}" if unit else "")).strip() if curr_val is not None else "–"
+        prev_str = (fmt(prev_val) + (f" {unit}" if unit else "")).strip() if prev_val is not None else "–"
+        is_sel = st.session_state["trend_metric"] == key
+        border = "border:2px solid #38b2ac;" if is_sel else "border:1px solid rgba(255,255,255,0.08);"
+
+        with card_cols[i]:
+            st.markdown(
+                f"""<div style="background:rgba(255,255,255,0.04);border-radius:10px;
+                    padding:12px 10px;{border}min-height:96px">
+                  <div style="font-size:0.72em;font-weight:600;color:#a0aec0">{label}</div>
+                  <div style="font-size:0.62em;color:#718096;margin-top:1px">This {period_singular}</div>
+                  <div style="font-size:1.05em;font-weight:700;margin:5px 0;color:#e2e8f0">
+                    {curr_str}&nbsp;<span style="font-size:0.8em;color:{arrow_color}">{arrow}</span>
+                  </div>
+                  <div style="font-size:0.62em;color:#718096">
+                    Last {period_singular}: {prev_str}
+                  </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1214,16 +1464,55 @@ def render_all_activities(data: Dict[str, Any]) -> None:
     st.markdown("---")
     st.subheader(f"Recent Activities — {selected_display}")
 
-    display_df = df[["date", "name", "activity_type", "dist_str", "duration_str", "average_heartrate"]].copy()
-    display_df.columns = ["Date", "Name", "Type", "Distance", "Duration", "Avg HR"]
+    table_cols = ["date", "name", "activity_type", "dist_str", "duration_str", "average_heartrate"]
+    col_names  = ["Date", "Name", "Type", "Distance", "Duration", "Avg HR"]
+    if "average_cadence" in df.columns:
+        table_cols.append("average_cadence")
+        col_names.append("SPM")
+    display_df = df[table_cols].copy()
+    display_df.columns = col_names
     display_df["Avg HR"] = display_df["Avg HR"].apply(lambda x: f"{x:.0f}" if pd.notna(x) and x else "–")
     display_df["Type"] = display_df["Type"].apply(lambda t: f"{_TYPE_ICONS.get(t, '🏅')} {t}")
+    if "SPM" in display_df.columns:
+        display_df["SPM"] = display_df["SPM"].apply(lambda x: f"{x:.0f}" if pd.notna(x) and x else "–")
 
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
         height=400,
+    )
+
+    # ── Excel download ────────────────────────────────────────────────────
+    import io
+    export_cols = {
+        "date": "Date",
+        "name": "Name",
+        "activity_type": "Type",
+        "dist_str": "Distance",
+        "duration_str": "Duration",
+        "average_heartrate": "Avg HR (bpm)",
+        "distance_km": "Distance (km)",
+        "average_cadence": "SPM",
+    }
+    available = [c for c in export_cols if c in df.columns]
+    export_df = df[available].rename(columns=export_cols)
+    export_df["Avg HR (bpm)"] = export_df["Avg HR (bpm)"].apply(
+        lambda x: round(x, 0) if pd.notna(x) and x else None
+    )
+    if "SPM" in export_df.columns:
+        export_df["SPM"] = export_df["SPM"].apply(
+            lambda x: round(x, 0) if pd.notna(x) and x else None
+        )
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Activities")
+    filename = f"activities_{selected_display.replace(' ', '_').replace('(', '').replace(')', '')}.xlsx"
+    st.download_button(
+        label="⬇️ Download as Excel",
+        data=buf.getvalue(),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
@@ -1727,17 +2016,539 @@ def render_profile() -> None:
     st.subheader("AI Coach Memory")
     st.caption("The AI coach remembers your recent conversations across sessions.")
     if st.button("Clear Chat Memory", help="Remove all stored chat history"):
-        result = _api_post("/ai/chat/memory")
-        # Use DELETE via requests directly since _api_post uses POST
         try:
-            import requests as _requests
-            resp = _requests.delete(f"{BACKEND_URL}/ai/chat/memory", timeout=10)
+            resp = requests.delete(f"{BACKEND_URL}/ai/chat/memory", timeout=10)
             if resp.ok:
                 st.success("Chat memory cleared.")
             else:
-                st.error("Failed to clear memory.")
+                st.error(f"Failed to clear memory: {resp.status_code}")
         except Exception as exc:
             st.error(f"Error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Sleep
+# ---------------------------------------------------------------------------
+
+
+def render_sleep() -> None:
+    st.subheader("Sleep & Health Sync")
+    st.caption("Data synced from Apple Health via your iOS Shortcut (Garmin → Apple Health → Shortcut → App)")
+
+    history = get_sleep_history(days=30)
+
+    # --- Sync status ---
+    if not history:
+        st.markdown(
+            '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
+            'border-radius:6px;padding:14px 18px;">'
+            '<b>No sleep data synced yet.</b><br/>'
+            'Run your iOS Shortcut manually or wait for the 9 AM automation. '
+            'Once data arrives it will appear here.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Most recent entry
+    latest = history[0]
+    latest_date = latest.get("date", "")
+    sleep_ok = latest.get("sleep_duration_hours") is not None
+    rhr_ok = latest.get("resting_hr") is not None
+
+    status_parts = []
+    if sleep_ok:
+        status_parts.append(f"Sleep: {latest.get('sleep_duration_hours'):.1f} h")
+    if rhr_ok:
+        status_parts.append(f"Resting HR: {latest.get('resting_hr')} bpm")
+    stages = [
+        ("Deep", latest.get("sleep_deep_hours")),
+        ("REM", latest.get("sleep_rem_hours")),
+        ("Core", latest.get("sleep_core_hours")),
+    ]
+    stage_parts = [f"{n}: {v:.1f}h" for n, v in stages if v]
+    if stage_parts:
+        status_parts.append("Stages — " + ", ".join(stage_parts))
+
+    sync_color = "#48BB78" if sleep_ok else "#ECC94B"
+    sync_msg = " · ".join(status_parts) if status_parts else "Partial data (sleep stages missing)"
+    st.markdown(
+        f'<div style="background:rgba(72,187,120,0.08);border-left:4px solid {sync_color};'
+        f'border-radius:6px;padding:12px 16px;margin-bottom:12px;">'
+        f'<b>Latest sync: {latest_date}</b><br/>{sync_msg}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Build DataFrame
+    df = pd.DataFrame(history)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date")
+
+    # --- Sleep duration chart ---
+    st.markdown("---")
+    st.subheader("Sleep Duration (last 30 days)")
+    sleep_rows = df[df["sleep_duration_hours"].notna()]
+    if not sleep_rows.empty:
+        colors = [
+            "#48BB78" if h >= 7 else "#ECC94B" if h >= 6 else "#F56565"
+            for h in sleep_rows["sleep_duration_hours"]
+        ]
+        fig_dur = go.Figure(go.Bar(
+            x=sleep_rows["date"].dt.strftime("%b %d"),
+            y=sleep_rows["sleep_duration_hours"],
+            marker_color=colors,
+            text=[f"{h:.1f}h" for h in sleep_rows["sleep_duration_hours"]],
+            textposition="outside",
+        ))
+        fig_dur.add_hline(y=7, line_dash="dash", line_color="#48BB78",
+                          annotation_text="Target 7h", annotation_position="top right")
+        fig_dur.update_layout(
+            height=280, margin=dict(l=0, r=0, t=20, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title="Hours", range=[0, max(sleep_rows["sleep_duration_hours"].max() + 1, 9)]),
+            xaxis=dict(title=""),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_dur, use_container_width=True)
+        avg = sleep_rows["sleep_duration_hours"].mean()
+        nights_ok = (sleep_rows["sleep_duration_hours"] >= 7).sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Average Sleep", f"{avg:.1f} h")
+        c2.metric("Nights ≥ 7h", f"{nights_ok}/{len(sleep_rows)}")
+        c3.metric("Days Synced", len(history))
+    else:
+        st.info("Sleep duration data not yet available — the Shortcut sleep query may need adjusting.")
+
+    # --- Sleep stages stacked bar ---
+    stage_rows = df[df[["sleep_deep_hours", "sleep_rem_hours", "sleep_core_hours"]].notna().any(axis=1)]
+    if not stage_rows.empty:
+        st.markdown("---")
+        st.subheader("Sleep Stage Breakdown")
+        fig_stages = go.Figure()
+        stage_map = [
+            ("Deep", "sleep_deep_hours", "#4299E1"),
+            ("REM", "sleep_rem_hours", "#9F7AEA"),
+            ("Core / Light", "sleep_core_hours", "#68D391"),
+            ("Awake", "sleep_awake_hours", "#FC8181"),
+        ]
+        for label, col, color in stage_map:
+            vals = stage_rows[col].fillna(0) if col in stage_rows.columns else [0] * len(stage_rows)
+            fig_stages.add_trace(go.Bar(
+                name=label,
+                x=stage_rows["date"].dt.strftime("%b %d"),
+                y=vals,
+                marker_color=color,
+            ))
+        fig_stages.update_layout(
+            barmode="stack", height=280, margin=dict(l=0, r=0, t=20, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title="Hours"),
+            xaxis=dict(title=""),
+            legend=dict(orientation="h", y=-0.25),
+        )
+        st.plotly_chart(fig_stages, use_container_width=True)
+
+    # --- Resting HR trend ---
+    rhr_rows = df[df["resting_hr"].notna()]
+    if not rhr_rows.empty:
+        st.markdown("---")
+        st.subheader("Resting Heart Rate Trend")
+        fig_rhr = go.Figure(go.Scatter(
+            x=rhr_rows["date"].dt.strftime("%b %d"),
+            y=rhr_rows["resting_hr"],
+            mode="lines+markers",
+            line=dict(color="#63B3ED", width=2),
+            marker=dict(size=7),
+            fill="tozeroy",
+            fillcolor="rgba(99,179,237,0.08)",
+        ))
+        fig_rhr.update_layout(
+            height=220, margin=dict(l=0, r=0, t=20, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title="bpm"),
+            xaxis=dict(title=""),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_rhr, use_container_width=True)
+        avg_rhr = rhr_rows["resting_hr"].mean()
+        min_rhr = rhr_rows["resting_hr"].min()
+        max_rhr = rhr_rows["resting_hr"].max()
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Average", f"{avg_rhr:.0f} bpm")
+        r2.metric("Best (lowest)", f"{min_rhr:.0f} bpm")
+        r3.metric("Highest", f"{max_rhr:.0f} bpm")
+
+    # --- Raw data table ---
+    st.markdown("---")
+    st.subheader("Raw Sync Log")
+    st.caption("Every row is one Shortcut run. Use this to verify what data is coming through.")
+    display_df = df.copy()
+    display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
+    display_df = display_df[[c for c in [
+        "date", "sleep_duration_hours", "sleep_deep_hours",
+        "sleep_rem_hours", "sleep_core_hours", "sleep_awake_hours", "resting_hr", "hrv"
+    ] if c in display_df.columns]]
+    display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
+    st.dataframe(display_df.sort_values("Date", ascending=False), use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# FM Plan Tracker
+# ---------------------------------------------------------------------------
+
+_STATUS_ICON = {"completed": "✅", "missed": "❌", "upcoming": "⏳"}
+_STATUS_COLOR = {"completed": "#276749", "missed": "#9b2c2c", "upcoming": "#744210"}
+
+
+def _plan_badge(status: str) -> str:
+    icon = _STATUS_ICON.get(status, "⏳")
+    color = _STATUS_COLOR.get(status, "#333")
+    return (
+        f'<span style="background:{color};color:#fff;padding:2px 8px;'
+        f'border-radius:4px;font-size:0.75em;font-weight:600">{icon} {status.upper()}</span>'
+    )
+
+
+def render_fm_plan() -> None:
+    st.header("FM Plan Tracker")
+    st.caption("Full marathon training plan — Sep 2026 → Sep 2027 target.")
+
+    # ---- plan status ----
+    try:
+        status_resp = requests.get(f"{BACKEND_URL}/plan/status", timeout=10)
+        status_data = status_resp.json()
+    except Exception as exc:
+        st.error(f"Cannot reach backend: {exc}")
+        return
+
+    total_workouts = status_data.get("total_workouts", 0)
+
+    if total_workouts == 0:
+        st.info("No plan loaded yet. Click below to import from the xlsx file.")
+        if st.button("Import Plan from File", type="primary"):
+            with st.spinner("Importing plan…"):
+                imp_resp = requests.post(f"{BACKEND_URL}/plan/import", timeout=30)
+            if imp_resp.status_code == 200:
+                r = imp_resp.json()
+                st.success(f"Plan imported: {r.get('inserted', 0)} new, {r.get('updated', 0)} updated workouts.")
+                st.rerun()
+            else:
+                st.error(f"Import failed: {imp_resp.text}")
+        return
+
+    # ---- header metrics ----
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Total Workouts", total_workouts)
+    mc2.metric("Total Weeks", status_data.get("total_weeks", 0))
+    mc3.metric("Planned KM", f"{status_data.get('total_planned_km', 0):.0f}")
+
+    if st.button("Re-import Plan", help="Re-parse the xlsx and update DB"):
+        with st.spinner("Re-importing…"):
+            imp_resp = requests.post(f"{BACKEND_URL}/plan/import", timeout=30)
+        if imp_resp.status_code == 200:
+            r = imp_resp.json()
+            st.success(f"Re-imported: {r.get('updated', 0)} updated, {r.get('inserted', 0)} new.")
+            st.rerun()
+        else:
+            st.error(f"Import failed: {imp_resp.text}")
+
+    st.markdown("---")
+
+    # ---- weeks list ----
+    try:
+        weeks_resp = requests.get(f"{BACKEND_URL}/plan/weeks", timeout=10)
+        weeks: list = weeks_resp.json()
+    except Exception as exc:
+        st.error(f"Failed to load weeks: {exc}")
+        return
+
+    if not weeks:
+        st.warning("No weeks found. Import the plan first.")
+        return
+
+    # Default selection: current week if present, else last past week
+    from datetime import date as _date
+    current_iso = _date.today().strftime("%G-W%V")
+    week_labels = [w["iso_week"] for w in weeks]
+    phase_map = {w["iso_week"]: w["phase"] for w in weeks}
+    planned_km_map = {w["iso_week"]: w["planned_km"] for w in weeks}
+
+    default_idx = next(
+        (i for i, w in enumerate(weeks) if w["iso_week"] == current_iso), None
+    )
+    if default_idx is None:
+        # Pick last past week
+        past = [i for i, w in enumerate(weeks) if w["phase"] == "past"]
+        default_idx = past[-1] if past else 0
+
+    def _week_label(w: dict) -> str:
+        phase_tag = {"current": " (current)", "future": " (upcoming)", "past": ""}.get(w["phase"], "")
+        return f"{w['iso_week']}  ·  {w['planned_km']:.0f} km planned{phase_tag}"
+
+    selected_idx = st.selectbox(
+        "Select training week",
+        options=range(len(weeks)),
+        index=default_idx,
+        format_func=lambda i: _week_label(weeks[i]),
+    )
+    selected_week = weeks[selected_idx]["iso_week"]
+
+    # ---- week detail ----
+    try:
+        week_resp = requests.get(f"{BACKEND_URL}/plan/week/{selected_week}", timeout=10)
+        week_data = week_resp.json()
+    except Exception as exc:
+        st.error(f"Failed to load week detail: {exc}")
+        return
+
+    workouts = week_data.get("workouts", [])
+    planned_km_total = week_data.get("planned_km", 0)
+    actual_km_total = week_data.get("actual_km", 0)
+
+    wc1, wc2, wc3 = st.columns(3)
+    wc1.metric("Week Planned", f"{planned_km_total:.1f} km")
+    wc2.metric("Week Actual", f"{actual_km_total:.1f} km")
+    wc3.metric(
+        "Distance Diff",
+        f"{actual_km_total - planned_km_total:+.1f} km",
+        delta_color="off",
+    )
+
+    st.markdown("")
+
+    # ---- individual runs ----
+    for workout in workouts:
+        status = workout["status"]
+        actual = workout.get("actual")
+        strava_id = actual["strava_id"] if actual else None
+
+        with st.container(border=True):
+            row_top = st.columns([3, 2, 2, 1])
+            with row_top[0]:
+                st.markdown(
+                    f"{_plan_badge(status)}&nbsp;&nbsp;<b>{workout['plan_date']}</b>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(f"**{workout['session_type']}** · {workout['distance_km']:.1f} km planned")
+                if workout.get("details"):
+                    st.caption(workout["details"])
+
+            with row_top[1]:
+                if actual:
+                    st.metric("Actual Dist", f"{actual['distance_km']:.2f} km")
+                    st.metric("Pace", actual.get("pace") or "N/A")
+                else:
+                    st.markdown("*No matching run found*")
+
+            with row_top[2]:
+                if actual:
+                    hr = actual.get("avg_hr")
+                    spm = actual.get("spm")
+                    st.metric("Avg HR", f"{hr} bpm" if hr else "N/A")
+                    st.metric("SPM", spm if spm else "N/A")
+
+            with row_top[3]:
+                if status == "completed" and strava_id:
+                    review_key = f"plan_review_{strava_id}"
+                    cached_review = workout.get("ai_review")
+                    if not cached_review and review_key not in st.session_state:
+                        if st.button("AI Review", key=f"btn_review_{strava_id}"):
+                            with st.spinner("Generating…"):
+                                r = requests.post(
+                                    f"{BACKEND_URL}/plan/review/{strava_id}",
+                                    timeout=30,
+                                )
+                            if r.status_code == 200:
+                                st.session_state[review_key] = r.json()["review"]
+                            st.rerun()
+
+            # Show review (either from DB or generated this session)
+            review_text = (
+                workout.get("ai_review")
+                or st.session_state.get(f"plan_review_{strava_id}")
+            )
+            if review_text:
+                st.markdown(
+                    f'<div class="insight-box">{review_text}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ---- weekly AI summary ----
+    st.markdown("---")
+    st.subheader(f"Weekly AI Summary — {selected_week}")
+
+    summary_key = f"plan_weekly_summary_{selected_week}"
+    saved_summary = week_data.get("weekly_summary")
+
+    if not saved_summary and summary_key not in st.session_state:
+        if st.button("Generate Weekly Summary", key=f"btn_summary_{selected_week}", type="primary"):
+            with st.spinner("Generating weekly summary…"):
+                sr = requests.post(
+                    f"{BACKEND_URL}/plan/weekly-summary/{selected_week}",
+                    timeout=60,
+                )
+            if sr.status_code == 200:
+                st.session_state[summary_key] = sr.json()["summary"]
+            elif sr.status_code == 404:
+                st.warning("No workouts found for this week.")
+            else:
+                st.error(f"Failed: {sr.text}")
+            st.rerun()
+    else:
+        summary_text = saved_summary or st.session_state.get(summary_key)
+        if summary_text:
+            st.markdown(
+                f'<div class="insight-box">{summary_text}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                "Regenerate Summary",
+                key=f"btn_regen_summary_{selected_week}",
+                help="Generate a fresh summary (overwrites saved)",
+            ):
+                # Clear cached entry in DB by force-calling without cached check
+                # We delete from session state so the next save goes through
+                if summary_key in st.session_state:
+                    del st.session_state[summary_key]
+                with st.spinner("Regenerating…"):
+                    # Delete existing from DB via direct re-post (server will overwrite)
+                    sr = requests.post(
+                        f"{BACKEND_URL}/plan/weekly-summary/{selected_week}?force=1",
+                        timeout=60,
+                    )
+                if sr.status_code == 200:
+                    st.session_state[summary_key] = sr.json()["summary"]
+                st.rerun()
+
+    # ---- monthly progress section ----
+    st.markdown("---")
+    st.subheader("Monthly Progress")
+
+    try:
+        months_resp = requests.get(f"{BACKEND_URL}/plan/months", timeout=10)
+        months: list = months_resp.json()
+    except Exception as exc:
+        st.warning(f"Could not load months: {exc}")
+        months = []
+
+    if months:
+        from datetime import date as _mdate
+        cur_month_key = _mdate.today().strftime("%Y-%m")
+        default_m = next(
+            (i for i, m in enumerate(months) if m["year_month"] == cur_month_key), None
+        )
+        if default_m is None:
+            past_m = [i for i, m in enumerate(months) if m["phase"] == "past"]
+            default_m = past_m[-1] if past_m else 0
+
+        def _month_label(m: dict) -> str:
+            tag = {"current": " (current)", "future": " (upcoming)", "past": ""}.get(m["phase"], "")
+            return f"{m['display']}{tag}"
+
+        sel_month_idx = st.selectbox(
+            "Select month",
+            options=range(len(months)),
+            index=default_m,
+            format_func=lambda i: _month_label(months[i]),
+            key="month_selector",
+        )
+        sel_month_key = months[sel_month_idx]["year_month"]
+
+        try:
+            mdata_resp = requests.get(f"{BACKEND_URL}/plan/month/{sel_month_key}", timeout=15)
+            mdata = mdata_resp.json()
+        except Exception as exc:
+            st.error(f"Failed to load month data: {exc}")
+            mdata = None
+
+        if mdata:
+            mm1, mm2, mm3, mm4 = st.columns(4)
+            mm1.metric("Planned KM", f"{mdata['planned_km']:.0f} km")
+            mm2.metric("Actual KM", f"{mdata['actual_km']:.0f} km")
+            mm3.metric("Completion", f"{mdata['completion_pct']}%")
+            mm4.metric(
+                "Runs Done",
+                f"{mdata['completed']} / {mdata['completed'] + mdata['missed'] + mdata['upcoming']}",
+                help=f"Missed: {mdata['missed']}  ·  Upcoming: {mdata['upcoming']}",
+            )
+
+            chart_data = mdata.get("week_chart", [])
+            if chart_data:
+                import plotly.graph_objects as _go
+                weeks_x = [c["week"] for c in chart_data]
+                fig = _go.Figure(data=[
+                    _go.Bar(
+                        name="Planned km",
+                        x=weeks_x,
+                        y=[c["planned_km"] for c in chart_data],
+                        marker_color="#63b3ed",
+                    ),
+                    _go.Bar(
+                        name="Actual km",
+                        x=weeks_x,
+                        y=[c["actual_km"] for c in chart_data],
+                        marker_color="#48bb78",
+                    ),
+                ])
+                fig.update_layout(
+                    barmode="group",
+                    height=260,
+                    margin=dict(l=0, r=0, t=8, b=0),
+                    legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ccc", size=12),
+                    yaxis_title="km",
+                )
+                fig.update_xaxes(showgrid=False, tickangle=-30)
+                fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("")
+            m_summary_key = f"plan_month_summary_{sel_month_key}"
+            saved_m_summary = mdata.get("monthly_summary")
+
+            if not saved_m_summary and m_summary_key not in st.session_state:
+                if st.button(
+                    "Generate Monthly Summary",
+                    key=f"btn_msummary_{sel_month_key}",
+                    type="primary",
+                ):
+                    with st.spinner("Generating monthly summary…"):
+                        mr = requests.post(
+                            f"{BACKEND_URL}/plan/monthly-summary/{sel_month_key}",
+                            timeout=60,
+                        )
+                    if mr.status_code == 200:
+                        st.session_state[m_summary_key] = mr.json()["summary"]
+                    elif mr.status_code == 404:
+                        st.warning("No workouts found for this month.")
+                    else:
+                        st.error(f"Failed: {mr.text}")
+                    st.rerun()
+            else:
+                m_summary_text = saved_m_summary or st.session_state.get(m_summary_key)
+                if m_summary_text:
+                    st.markdown(
+                        f'<div class="insight-box">{m_summary_text}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button(
+                        "Regenerate Monthly Summary",
+                        key=f"btn_mregen_{sel_month_key}",
+                        help="Generate a fresh summary (overwrites saved)",
+                    ):
+                        if m_summary_key in st.session_state:
+                            del st.session_state[m_summary_key]
+                        with st.spinner("Regenerating…"):
+                            mr = requests.post(
+                                f"{BACKEND_URL}/plan/monthly-summary/{sel_month_key}?force=1",
+                                timeout=60,
+                            )
+                        if mr.status_code == 200:
+                            st.session_state[m_summary_key] = mr.json()["summary"]
+                        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1801,34 +2612,42 @@ def main() -> None:
                 bc4.metric("Fitness Trend", f"{traj_icon} {traj.capitalize()}", delta_color="off")
                 st.markdown("")
 
+        if total > 0:
+            render_best_efforts()
+
     # Tabs
-    tab_latest, tab_weekly, tab_monthly, tab_ai, tab_fatigue, tab_long, tab_all, tab_intel, tab_workout, tab_profile = st.tabs([
+    tab_latest, tab_trends, tab_be, tab_ai, tab_fatigue, tab_sleep, tab_long, tab_all, tab_intel, tab_workout, tab_plan, tab_profile = st.tabs([
         "Latest Run",
-        "Weekly",
-        "Monthly Trends",
+        "Trends",
+        "Best Efforts",
         "AI Coach",
         "Fatigue & Recovery",
+        "Sleep",
         "Long Runs",
         "All Activities",
         "Training Intelligence",
         "Workouts",
+        "FM Plan",
         "Profile",
     ])
 
     with tab_latest:
         render_latest_run(data)
 
-    with tab_weekly:
-        render_weekly(data)
+    with tab_trends:
+        render_trends(data)
 
-    with tab_monthly:
-        render_monthly(data)
+    with tab_be:
+        render_best_efforts_tab()
 
     with tab_ai:
         render_ai_coach(data)
 
     with tab_fatigue:
         render_fatigue(data)
+
+    with tab_sleep:
+        render_sleep()
 
     with tab_long:
         render_long_runs(data)
@@ -1841,6 +2660,9 @@ def main() -> None:
 
     with tab_workout:
         render_workouts(data)
+
+    with tab_plan:
+        render_fm_plan()
 
     with tab_profile:
         render_profile()

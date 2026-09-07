@@ -85,9 +85,13 @@ class ActivityService:
         ts_engine = TrainingStateEngine(all_activities, run_activities=run_activities)
         training_state = ts_engine.compute_all()
 
-        # Fetch today's Apple Health data (synced by iOS Shortcut)
+        # Fetch today's Apple Health data (synced by iOS Shortcut).
+        # Fall back to yesterday if today's sync hasn't run yet (e.g. before 9 AM).
         import datetime as _datetime_mod
         today_health = get_health_data_for_date(self._db, _datetime_mod.date.today())
+        if today_health is None:
+            yesterday = _datetime_mod.date.today() - _datetime_mod.timedelta(days=1)
+            today_health = get_health_data_for_date(self._db, yesterday)
 
         # Pull profile baseline resting HR for elevation comparison
         _baseline_rhr = None
@@ -198,15 +202,7 @@ class ActivityService:
             "weekly_plan": weekly_plan,
             "is_connected": is_connected,
             "athlete_name": token.athlete_name if token else None,
-            "today_health": {
-                "sleep_duration_hours": today_health.sleep_duration_hours if today_health else None,
-                "sleep_deep_hours": today_health.sleep_deep_hours if today_health else None,
-                "sleep_rem_hours": today_health.sleep_rem_hours if today_health else None,
-                "sleep_core_hours": today_health.sleep_core_hours if today_health else None,
-                "sleep_awake_hours": today_health.sleep_awake_hours if today_health else None,
-                "resting_hr": today_health.resting_hr if today_health else None,
-                "date": today_health.date.isoformat() if today_health else None,
-            } if today_health else None,
+            "today_health": _health_row_to_dict(today_health) if today_health else None,
         }
 
     # ------------------------------------------------------------------
@@ -323,3 +319,23 @@ def _df_to_records(df) -> List[Dict[str, Any]]:
 
     records = df.to_dict(orient="records")
     return [{k: _clean(v) for k, v in rec.items()} for rec in records]
+
+
+def _health_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Serialise a DailyHealthMetric row, deriving total sleep from stages if stored total is missing."""
+    total = row.sleep_duration_hours
+    if not total:
+        stage_sum = sum(
+            v for v in (row.sleep_deep_hours, row.sleep_rem_hours, row.sleep_core_hours)
+            if v is not None
+        )
+        total = round(stage_sum, 2) if stage_sum > 0 else None
+    return {
+        "date": row.date.isoformat() if row.date else None,
+        "sleep_duration_hours": total,
+        "sleep_deep_hours": row.sleep_deep_hours,
+        "sleep_rem_hours": row.sleep_rem_hours,
+        "sleep_core_hours": row.sleep_core_hours,
+        "sleep_awake_hours": row.sleep_awake_hours,
+        "resting_hr": row.resting_hr,
+    }

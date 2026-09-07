@@ -34,8 +34,9 @@ def get_db():
 def init_db() -> None:
     """Create all tables defined on Base metadata."""
     # Import models so their table definitions are registered on Base.metadata
-    from backend.models import activity  # noqa: F401
-    from backend.models import profile   # noqa: F401
-    from backend.models import health    # noqa: F401
+    from backend.models import activity        # noqa: F401
+    from backend.models import profile         # noqa: F401
+    from backend.models import health          # noqa: F401
+    from backend.models import training_plan   # noqa: F401
 
     Base.metadata.create_all(bind=engine)

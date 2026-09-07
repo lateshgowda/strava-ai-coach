@@ -188,6 +188,12 @@ You have access to this athlete's complete training data below. Use it in every 
 CURRENT TRAINING METRICS:
 {metrics_text}
 
+CRITICAL — DATA AVAILABILITY RULES:
+- The CURRENT TRAINING METRICS block above is the ONLY source of truth. It supersedes anything said in prior conversation history.
+- If sleep_last_2_nights appears in the metrics above, sleep data IS available — reference it directly with the exact values shown.
+- If resting_hr_bpm appears in sleep_last_2_nights, that is the morning HR from the athlete's wearable.
+- NEVER say you don't have data that is present in the metrics block above.
+
 HOW TO RESPOND:
 - Always reference the athlete's actual numbers — never give generic advice
 - Explain the WHY behind every recommendation (the physiology, not just the what)
@@ -197,10 +203,10 @@ HOW TO RESPOND:
 - For race questions: use the race_predictions data and explain confidence
 - For HR drift questions: use hr_efficiency_trend and pace_efficiency_trend data
 - For long run fade: use the long_run_pace_fade verdict and data
+- For sleep questions: use sleep_last_2_nights data — total_sleep_hours, deep_sleep_hours, rem_sleep_hours
 - Keep responses 150–250 words unless a detailed breakdown is requested
 - Use a supportive but honest tone — do not sugarcoat problems
 - No medical advice. No hallucinated metrics — only reference data you have.
-- Do not repeat information the athlete already knows unless they ask
 """
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -219,6 +225,180 @@ HOW TO RESPOND:
         return content.strip() if content else "I couldn't generate a response. Please try again."
     except Exception as exc:
         return f"Unable to reach AI coach: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# FM Plan — per-run review
+# ---------------------------------------------------------------------------
+
+
+def generate_plan_run_review(planned: Dict[str, Any], actual: Dict[str, Any]) -> str:
+    """2-3 sentence coaching review for a single run vs the plan."""
+    if not OPENROUTER_API_KEY:
+        return "OpenRouter API key not configured."
+
+    prompt = f"""/no_think
+You are an experienced marathon coach reviewing a training run against the planned session.
+Be direct, specific, and constructive. Respond in exactly 3 sentences.
+
+PLANNED:
+- Date: {planned.get('plan_date')}
+- Session type: {planned.get('session_type')}
+- Target distance: {planned.get('distance_km', 0):.1f} km
+- Coach notes: {planned.get('details') or 'No target details'}
+
+ACTUAL:
+- Date: {actual.get('date')}
+- Distance: {actual.get('distance_km', 0):.2f} km
+- Avg HR: {actual.get('avg_hr') or 'N/A'} bpm
+- Pace: {actual.get('pace') or 'N/A'} /km
+- Cadence (SPM): {actual.get('spm') or 'N/A'}
+
+Write exactly 3 sentences:
+1. Whether the session was executed as planned (compare distance and any HR/pace targets)
+2. One specific observation about execution quality
+3. One actionable tip for the next similar session
+"""
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.6,
+        )
+        content = response.choices[0].message.content
+        return content.strip() if content else "Could not generate review."
+    except Exception as exc:
+        return f"Review generation failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# FM Plan — monthly summary
+# ---------------------------------------------------------------------------
+
+
+def generate_plan_monthly_summary(month_data: Dict[str, Any]) -> str:
+    """Comprehensive monthly coaching review assessing FM Sep 2027 readiness."""
+    if not OPENROUTER_API_KEY:
+        return "OpenRouter API key not configured."
+
+    display = month_data.get("display", month_data.get("year_month"))
+    month_num = month_data.get("month_num", "?")
+    planned_km = month_data.get("planned_km", 0)
+    actual_km = month_data.get("actual_km", 0)
+    completed = month_data.get("completed", 0)
+    missed = month_data.get("missed", 0)
+    upcoming = month_data.get("upcoming", 0)
+    completion_pct = month_data.get("completion_pct", 0)
+
+    # Build per-run detail
+    run_lines = []
+    for i, run in enumerate(month_data.get("workouts", []), 1):
+        planned_str = f"{run['distance_km']:.1f}km {run['session_type']}"
+        if run["status"] == "completed" and run.get("actual"):
+            a = run["actual"]
+            pace_str = f"@ {a['pace']}/km" if a.get("pace") else ""
+            hr_str = f"HR {a['avg_hr']}" if a.get("avg_hr") else ""
+            run_lines.append(
+                f"  Run {i} ({run['plan_date']}): DONE — Planned {planned_str} | "
+                f"Actual {a['distance_km']:.1f}km {pace_str} {hr_str}".strip()
+            )
+        elif run["status"] == "missed":
+            run_lines.append(f"  Run {i} ({run['plan_date']}): MISSED — Planned {planned_str}")
+        else:
+            run_lines.append(f"  Run {i} ({run['plan_date']}): UPCOMING — Planned {planned_str}")
+
+    prompt = f"""/no_think
+You are an experienced marathon coach writing a monthly training review for an athlete \
+targeting a sub-5-hour full marathon in September 2027. This is training month {month_num} of ~13. \
+Target race pace: 6:30–6:40/km. The plan has 3 runs per week (Tue/Thu/Sat).
+
+MONTH: {display}
+Planned volume: {planned_km:.1f} km | Actual volume: {actual_km:.1f} km | Completion: {completion_pct}%
+Runs completed: {completed} | Missed: {missed} | Upcoming: {upcoming}
+
+ALL RUNS THIS MONTH:
+{chr(10).join(run_lines)}
+
+Write a comprehensive 5–6 sentence monthly coaching review covering:
+1. Volume execution — how closely did actual match planned km?
+2. Consistency — how many sessions were completed vs missed, and what pattern do you notice?
+3. Quality observations — any standout pace, HR, or cadence trends from the completed runs?
+4. FM readiness assessment — based on month {month_num} of 13, is the athlete on track for Sep 2027?
+5. Biggest win this month and biggest area to improve
+6. One specific focus and measurable target for next month
+
+Be direct, specific, and reference actual numbers. No generic statements.
+"""
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.6,
+        )
+        content = response.choices[0].message.content
+        return content.strip() if content else "Could not generate monthly summary."
+    except Exception as exc:
+        return f"Monthly summary generation failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# FM Plan — weekly summary
+# ---------------------------------------------------------------------------
+
+
+def generate_plan_weekly_summary(iso_week: str, week_runs: List[Dict[str, Any]]) -> str:
+    """4-sentence weekly coaching summary for FM plan progress."""
+    if not OPENROUTER_API_KEY:
+        return "OpenRouter API key not configured."
+
+    runs_lines = []
+    for i, run in enumerate(week_runs, 1):
+        planned_str = f"{run['distance_km']:.1f}km {run['session_type']}"
+        if run["status"] == "completed" and run.get("actual"):
+            a = run["actual"]
+            pace_str = f"@ {a['pace']}/km" if a.get("pace") else ""
+            hr_str = f"HR {a['avg_hr']}" if a.get("avg_hr") else ""
+            runs_lines.append(
+                f"Run {i}: DONE — Planned {planned_str} | Actual {a['distance_km']:.1f}km {pace_str} {hr_str}".strip()
+            )
+        elif run["status"] == "missed":
+            runs_lines.append(f"Run {i}: MISSED — Planned {planned_str}")
+        else:
+            runs_lines.append(f"Run {i}: UPCOMING — Planned {planned_str}")
+
+    prompt = f"""/no_think
+You are an experienced marathon coach writing a weekly review for an athlete targeting a \
+full marathon in September 2027. Target finish pace: 6:30–6:40/km.
+
+WEEK: {iso_week}
+RUNS:
+{chr(10).join(runs_lines)}
+
+Write exactly 4 sentences covering:
+1. Overall execution of the week (completed, partial, or missed)
+2. What went well — be specific, reference actual numbers
+3. What needs improvement — be specific and honest
+4. One concrete focus for next week
+"""
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=350,
+            temperature=0.6,
+        )
+        content = response.choices[0].message.content
+        return content.strip() if content else "Could not generate summary."
+    except Exception as exc:
+        return f"Summary generation failed: {exc}"
 
 
 # ---------------------------------------------------------------------------

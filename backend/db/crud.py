@@ -225,6 +225,36 @@ def save_health_data(db: Session, data: Dict) -> Any:
 
     row_date = _parse_date_flexible(data.get("date"))
 
+    # Normalise sleep values:
+    # - Shortcuts Calculate Statistics returns seconds; convert to hours if > 24
+    # - Treat 0 as null (no samples found)
+    # - Cap at 15h max (sanity check)
+    _sleep_fields = ("sleep_duration_hours", "sleep_deep_hours",
+                     "sleep_rem_hours", "sleep_core_hours", "sleep_awake_hours")
+    for f in _sleep_fields:
+        v = data.get(f)
+        if v is None:
+            continue
+        if v == 0 or v == 0.0:
+            data[f] = None
+            continue
+        # Convert seconds → hours if value looks like seconds (> 24)
+        if v > 24:
+            v = round(v / 3600, 2)
+            data[f] = v
+        # Sanity cap: more than 15h is still wrong data
+        if v > 15:
+            data[f] = None
+
+    # If total sleep is missing but stages are present, derive it
+    if not data.get("sleep_duration_hours"):
+        stage_total = sum(
+            data.get(f) or 0
+            for f in ("sleep_deep_hours", "sleep_rem_hours", "sleep_core_hours")
+        )
+        if stage_total > 0:
+            data["sleep_duration_hours"] = round(stage_total, 2)
+
     existing = db.query(DailyHealthMetric).filter(DailyHealthMetric.date == row_date).first()
     if existing:
         for k, v in data.items():

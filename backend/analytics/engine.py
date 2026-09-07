@@ -487,6 +487,90 @@ class AnalyticsEngine:
     # Recent trend summary
     # ------------------------------------------------------------------
 
+    def trends_aggregates(self, period: str = "month") -> List[Dict[str, Any]]:
+        """
+        Return per-period aggregates for all 6 trend metrics.
+        period: "week" (last 16 weeks) | "month" (last 12 months) | "year" (all years)
+        Each record: label, display, distance_km, avg_pace, activities,
+                     elevation_m, moving_time_sec, avg_hr, is_current
+        """
+        if self.df.empty:
+            return []
+
+        df = self.df.copy()
+
+        if period == "week":
+            cutoff = datetime.utcnow() - timedelta(weeks=16)
+            df = df[df["start_date"] >= pd.Timestamp(cutoff)]
+            group_col = "week"
+        elif period == "year":
+            df = df.copy()
+            df["year"] = df["start_date"].dt.year.astype(str)
+            group_col = "year"
+        else:
+            cutoff = datetime.utcnow() - timedelta(days=12 * 30)
+            df = df[df["start_date"] >= pd.Timestamp(cutoff)]
+            group_col = "month"
+
+        if df.empty:
+            return []
+
+        agg = (
+            df.groupby(group_col)
+            .agg(
+                distance_km=("distance_km", "sum"),
+                activities=("strava_id", "count"),
+                elevation_m=("elevation_gain", "sum"),
+                moving_time_sec=("moving_time", "sum"),
+                avg_hr=("average_heartrate", "mean"),
+                _total_time=("moving_time", "sum"),
+                _total_dist=("distance", "sum"),
+            )
+            .reset_index()
+            .sort_values(group_col)
+        )
+
+        def _weighted_pace(row: "pd.Series") -> Optional[float]:
+            if row["_total_dist"] > 0:
+                return (row["_total_time"] / 60.0) / (row["_total_dist"] / 1000.0)
+            return None
+
+        agg["avg_pace"] = agg.apply(_weighted_pace, axis=1)
+
+        def _display(key: str) -> str:
+            if period == "week":
+                try:
+                    yr, wk = key.split("-W")
+                    monday = datetime.strptime(f"{yr}-{int(wk):02d}-1", "%G-%V-%u")
+                    sunday = monday + timedelta(days=6)
+                    return sunday.strftime("%-d %b")
+                except Exception:
+                    return key
+            elif period == "month":
+                try:
+                    y, m = key.split("-")
+                    return datetime(int(y), int(m), 1).strftime("%b %y")
+                except Exception:
+                    return key
+            return key
+
+        agg["display"] = agg[group_col].apply(_display)
+
+        now = datetime.utcnow()
+        if period == "week":
+            current_key = now.strftime("%G-W%V")
+        elif period == "year":
+            current_key = str(now.year)
+        else:
+            current_key = now.strftime("%Y-%m")
+
+        agg["is_current"] = agg[group_col] == current_key
+        agg.rename(columns={group_col: "label"}, inplace=True)
+
+        keep = ["label", "display", "distance_km", "avg_pace", "activities",
+                "elevation_m", "moving_time_sec", "avg_hr", "is_current"]
+        return agg[[c for c in keep if c in agg.columns]].to_dict(orient="records")
+
     def recent_trend_summary(self) -> Dict[str, Any]:
         """Return a compact dict comparing last 4 weeks vs previous 4 weeks."""
         default = {

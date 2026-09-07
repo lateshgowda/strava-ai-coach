@@ -278,10 +278,30 @@ async def ai_chat(request: ChatRequest, db: Session = Depends(get_db)) -> Dict[s
             }
         metrics["total_runs"] = dashboard.get("total_runs", 0)
 
-        # Include today's Apple Health data in coach context
-        if dashboard.get("today_health"):
-            th = dashboard["today_health"]
-            metrics["todays_health"] = {k: v for k, v in th.items() if v is not None}
+        # Include Apple Health sleep & HR data — last 2 days explicitly labelled
+        try:
+            recent_health = get_recent_health_data(db, days=2)
+            if recent_health:
+                sleep_entries = []
+                for rh in recent_health:
+                    total = rh.sleep_duration_hours
+                    if not total:
+                        stage_sum = sum(
+                            v for v in (rh.sleep_deep_hours, rh.sleep_rem_hours, rh.sleep_core_hours)
+                            if v is not None
+                        )
+                        total = round(stage_sum, 2) if stage_sum > 0 else None
+                    sleep_entries.append({
+                        "date": rh.date.isoformat(),
+                        "total_sleep_hours": total,
+                        "deep_sleep_hours": rh.sleep_deep_hours,
+                        "rem_sleep_hours": rh.sleep_rem_hours,
+                        "core_sleep_hours": rh.sleep_core_hours,
+                        "resting_hr_bpm": rh.resting_hr,
+                    })
+                metrics["sleep_last_2_nights"] = sleep_entries
+        except Exception:
+            pass
 
         # Include individual activities from the last 10 days so the AI can
         # answer questions like "what did I do last week?"
@@ -552,16 +572,7 @@ async def get_today_health_endpoint(db: Session = Depends(get_db)) -> Dict[str, 
     row = get_health_data_for_date(db, _dt.date.today())
     if not row:
         return {}
-    return {
-        "date": row.date.isoformat(),
-        "sleep_duration_hours": row.sleep_duration_hours,
-        "sleep_deep_hours": row.sleep_deep_hours,
-        "sleep_rem_hours": row.sleep_rem_hours,
-        "sleep_core_hours": row.sleep_core_hours,
-        "sleep_awake_hours": row.sleep_awake_hours,
-        "resting_hr": row.resting_hr,
-        "hrv": row.hrv,
-    }
+    return _serialize_health_row(row)
 
 
 @app.get("/health-data/history")
@@ -571,24 +582,382 @@ async def get_health_history_endpoint(
 ) -> List[Dict[str, Any]]:
     """Return health metrics for the last N days."""
     rows = get_recent_health_data(db, days=days)
-    return [
-        {
-            "date": r.date.isoformat(),
-            "sleep_duration_hours": r.sleep_duration_hours,
-            "sleep_deep_hours": r.sleep_deep_hours,
-            "sleep_rem_hours": r.sleep_rem_hours,
-            "sleep_core_hours": r.sleep_core_hours,
-            "sleep_awake_hours": r.sleep_awake_hours,
-            "resting_hr": r.resting_hr,
-            "hrv": r.hrv,
-        }
-        for r in rows
-    ]
+    return [_serialize_health_row(r) for r in rows]
+
+
+def _serialize_health_row(row: Any) -> Dict[str, Any]:
+    """Serialise a DailyHealthMetric row, deriving total sleep from stages if missing."""
+    total = row.sleep_duration_hours
+    # Derive total from stages if stored total is null or zero
+    if not total:
+        stage_sum = sum(
+            v for v in (row.sleep_deep_hours, row.sleep_rem_hours, row.sleep_core_hours)
+            if v is not None
+        )
+        total = round(stage_sum, 2) if stage_sum > 0 else None
+    return {
+        "date": row.date.isoformat(),
+        "sleep_duration_hours": total,
+        "sleep_deep_hours": row.sleep_deep_hours,
+        "sleep_rem_hours": row.sleep_rem_hours,
+        "sleep_core_hours": row.sleep_core_hours,
+        "sleep_awake_hours": row.sleep_awake_hours,
+        "resting_hr": row.resting_hr,
+        "hrv": row.hrv,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Chat Memory Management
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# FM Plan Tracker
+# ---------------------------------------------------------------------------
+
+
+@app.post("/plan/import")
+async def plan_import_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Parse Latesh_FM_Plan.xlsx and upsert all workouts into training_plan table."""
+    from backend.services.plan_service import PLAN_FILE, import_plan
+
+    if not PLAN_FILE.exists():
+        raise HTTPException(status_code=404, detail=f"Plan file not found at {PLAN_FILE}")
+    try:
+        stats = import_plan(db, PLAN_FILE)
+        logger.info("Plan imported: %s", stats)
+        return {"status": "ok", **stats}
+    except Exception as exc:
+        logger.error("Plan import failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/plan/status")
+async def plan_status_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Return high-level FM plan statistics (no activity matching)."""
+    from backend.services.plan_service import get_plan_status
+    return get_plan_status(db)
+
+
+@app.get("/plan/weeks")
+async def plan_weeks_endpoint(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    """Return all ISO weeks in the plan ordered chronologically."""
+    from backend.services.plan_service import get_all_weeks
+    return get_all_weeks(db)
+
+
+@app.get("/plan/week/{iso_week}")
+async def plan_week_detail_endpoint(
+    iso_week: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return full week detail: workouts, matched activities, AI reviews."""
+    from backend.services.plan_service import get_week_data
+    return get_week_data(db, iso_week)
+
+
+@app.post("/plan/review/{strava_id}")
+async def plan_run_review_endpoint(
+    strava_id: int,
+    db: Session = Depends(get_db),
+) -> Dict[str, str]:
+    """Generate (or return cached) AI review for a completed plan run."""
+    from backend.ai.coach import generate_plan_run_review
+    from backend.models.training_plan import AIRunReview
+    from backend.services.plan_service import find_matching_activity, save_run_review
+
+    # Return cached review if it exists
+    existing = db.query(AIRunReview).filter(AIRunReview.strava_id == strava_id).first()
+    if existing:
+        return {"review": existing.review_text, "cached": True}
+
+    # Find the activity
+    activity = get_activity_by_strava_id(db, strava_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Find the matching plan workout
+    from datetime import date as _date
+    act_date = activity.start_date.date()
+    from backend.models.training_plan import TrainingPlan
+    from datetime import timedelta as _td
+    workout = (
+        db.query(TrainingPlan)
+        .filter(
+            TrainingPlan.plan_date >= act_date - _td(days=1),
+            TrainingPlan.plan_date <= act_date + _td(days=1),
+        )
+        .first()
+    )
+
+    if not workout:
+        raise HTTPException(status_code=404, detail="No matching plan workout found for this activity")
+
+    dist_km = round((activity.distance or 0) / 1000.0, 2)
+    planned = {
+        "plan_date": workout.plan_date.isoformat(),
+        "session_type": workout.session_type,
+        "distance_km": workout.distance_km,
+        "details": workout.details,
+    }
+    actual = {
+        "date": activity.start_date.strftime("%Y-%m-%d"),
+        "distance_km": dist_km,
+        "avg_hr": round(activity.average_heartrate) if activity.average_heartrate else None,
+        "pace": (
+            f"{int((activity.moving_time / 60) / (activity.distance / 1000))}:"
+            f"{int(((activity.moving_time / 60) / (activity.distance / 1000) % 1) * 60):02d}"
+            if activity.moving_time and activity.distance and activity.distance > 0
+            else None
+        ),
+        "spm": round(activity.average_cadence) if activity.average_cadence else None,
+    }
+
+    review_text = generate_plan_run_review(planned, actual)
+    save_run_review(db, strava_id, workout.id, review_text)
+    return {"review": review_text, "cached": False}
+
+
+@app.post("/plan/weekly-summary/{iso_week}")
+async def plan_weekly_summary_endpoint(
+    iso_week: str,
+    force: bool = Query(False, description="Regenerate even if cached"),
+    db: Session = Depends(get_db),
+) -> Dict[str, str]:
+    """Generate (or return cached) AI weekly summary for an FM plan week."""
+    from backend.ai.coach import generate_plan_weekly_summary
+    from backend.models.training_plan import AIWeeklySummary
+    from backend.services.plan_service import get_week_data, save_weekly_summary
+
+    existing = db.query(AIWeeklySummary).filter(AIWeeklySummary.iso_week == iso_week).first()
+    if existing and not force:
+        return {"summary": existing.summary_text, "cached": True}
+
+    week = get_week_data(db, iso_week)
+    if not week["workouts"]:
+        raise HTTPException(status_code=404, detail="No workouts found for this week")
+
+    summary_text = generate_plan_weekly_summary(iso_week, week["workouts"])
+    save_weekly_summary(db, iso_week, summary_text)
+    return {"summary": summary_text, "cached": False}
+
+
+@app.get("/trends")
+async def get_trends(
+    period: str = Query("month", description="week | month | year"),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Return per-period aggregates for the Trends view (runs only)."""
+    from backend.analytics.engine import AnalyticsEngine
+    activities = get_activities(db, limit=2000, activity_type="Run")
+    engine = AnalyticsEngine(activities)
+    return engine.trends_aggregates(period=period)
+
+
+@app.get("/plan/months")
+async def plan_months_endpoint(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    """Return all distinct months in the plan."""
+    from backend.services.plan_service import get_all_months
+    return get_all_months(db)
+
+
+@app.get("/plan/month/{year_month}")
+async def plan_month_detail_endpoint(
+    year_month: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return full month detail: workouts, per-week chart data, saved summary."""
+    from backend.services.plan_service import get_month_data
+    return get_month_data(db, year_month)
+
+
+@app.post("/plan/monthly-summary/{year_month}")
+async def plan_monthly_summary_endpoint(
+    year_month: str,
+    force: bool = Query(False, description="Regenerate even if cached"),
+    db: Session = Depends(get_db),
+) -> Dict[str, str]:
+    """Generate (or return cached) AI monthly summary."""
+    from backend.ai.coach import generate_plan_monthly_summary
+    from backend.models.training_plan import AIMonthSummary
+    from backend.services.plan_service import get_month_data, save_month_summary
+
+    existing = db.query(AIMonthSummary).filter(AIMonthSummary.month_key == year_month).first()
+    if existing and not force:
+        return {"summary": existing.summary_text, "cached": True}
+
+    month = get_month_data(db, year_month)
+    if not month["workouts"]:
+        raise HTTPException(status_code=404, detail="No workouts found for this month")
+
+    summary_text = generate_plan_monthly_summary(month)
+    save_month_summary(db, year_month, summary_text)
+    return {"summary": summary_text, "cached": False}
+
+
+@app.get("/best-efforts")
+async def get_best_efforts(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Top-3 best efforts for 5K, 10K, 21K and top-3 longest runs."""
+    from backend.models.activity import Activity
+
+    _RUN_TYPES = {"Run", "TrailRun", "VirtualRun", "Race"}
+
+    def _fmt_time(secs: int) -> str:
+        h = secs // 3600
+        m = (secs % 3600) // 60
+        s = secs % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _fmt_pace(moving_time: int, distance: float) -> Optional[str]:
+        if not moving_time or not distance or distance <= 0:
+            return None
+        p = (moving_time / 60.0) / (distance / 1000.0)
+        return f"{int(p)}:{int((p % 1) * 60):02d}"
+
+    def _serialize(acts: List) -> List[Dict[str, Any]]:
+        out = []
+        for a in acts:
+            dist_km = (a.distance or 0) / 1000.0
+            out.append({
+                "strava_id": a.strava_id,
+                "name": a.name,
+                "date": a.start_date.strftime("%d %b %Y"),
+                "distance_km": round(dist_km, 2),
+                "time_str": _fmt_time(a.moving_time),
+                "pace": _fmt_pace(a.moving_time, a.distance),
+                "avg_hr": round(a.average_heartrate) if a.average_heartrate else None,
+            })
+        return out
+
+    buckets = {"5k": (4500, 5500), "10k": (9000, 11000), "21k": (19500, 22500)}
+    result: Dict[str, Any] = {}
+    for key, (lo, hi) in buckets.items():
+        rows = (
+            db.query(Activity)
+            .filter(
+                Activity.activity_type.in_(list(_RUN_TYPES)),
+                Activity.distance >= lo,
+                Activity.distance <= hi,
+                Activity.moving_time > 0,
+            )
+            .order_by(Activity.moving_time.asc())
+            .limit(3)
+            .all()
+        )
+        result[key] = _serialize(rows)
+
+    longest = (
+        db.query(Activity)
+        .filter(Activity.activity_type.in_(list(_RUN_TYPES)), Activity.distance > 0)
+        .order_by(Activity.distance.desc())
+        .limit(3)
+        .all()
+    )
+    result["longest"] = _serialize(longest)
+
+    # Most-recent run in each bracket (for the "Last" row)
+    last: Dict[str, Any] = {}
+    for key, (lo, hi) in {"10k": (9000, 11000), "21k": (19500, 22500)}.items():
+        row = (
+            db.query(Activity)
+            .filter(
+                Activity.activity_type.in_(list(_RUN_TYPES)),
+                Activity.distance >= lo,
+                Activity.distance <= hi,
+                Activity.moving_time > 0,
+            )
+            .order_by(Activity.start_date.desc())
+            .first()
+        )
+        last[key] = _serialize([row])[0] if row else None
+
+    last_long = (
+        db.query(Activity)
+        .filter(Activity.activity_type.in_(list(_RUN_TYPES)), Activity.distance >= 20000)
+        .order_by(Activity.start_date.desc())
+        .first()
+    )
+    last["longest"] = _serialize([last_long])[0] if last_long else None
+
+    result["last"] = last
+    return result
+
+
+@app.get("/best-efforts/yearly")
+async def get_best_efforts_yearly(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Best effort per year for 5K, 10K, 21K and longest run."""
+    from backend.models.activity import Activity
+    from sqlalchemy import extract
+
+    _RUN_TYPES = {"Run", "TrailRun", "VirtualRun", "Race"}
+
+    def _fmt_time(secs: int) -> str:
+        h = secs // 3600
+        m = (secs % 3600) // 60
+        s = secs % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _fmt_pace(moving_time: int, distance: float) -> Optional[str]:
+        if not moving_time or not distance or distance <= 0:
+            return None
+        p = (moving_time / 60.0) / (distance / 1000.0)
+        return f"{int(p)}:{int((p % 1) * 60):02d}"
+
+    def _one(a: Activity) -> Dict[str, Any]:
+        dist_km = (a.distance or 0) / 1000.0
+        return {
+            "date": a.start_date.strftime("%d %b %Y"),
+            "distance_km": round(dist_km, 2),
+            "time_str": _fmt_time(a.moving_time),
+            "pace": _fmt_pace(a.moving_time, a.distance),
+            "avg_hr": round(a.average_heartrate) if a.average_heartrate else None,
+        }
+
+    # Distinct years with run data, descending
+    year_rows = (
+        db.query(extract("year", Activity.start_date).label("yr"))
+        .filter(Activity.activity_type.in_(list(_RUN_TYPES)))
+        .distinct()
+        .order_by(extract("year", Activity.start_date).desc())
+        .all()
+    )
+    years = [int(r.yr) for r in year_rows]
+
+    buckets = {"5k": (4500, 5500), "10k": (9000, 11000), "21k": (19500, 22500)}
+    result_years = []
+
+    for yr in years:
+        row: Dict[str, Any] = {"year": yr}
+        for key, (lo, hi) in buckets.items():
+            best = (
+                db.query(Activity)
+                .filter(
+                    Activity.activity_type.in_(list(_RUN_TYPES)),
+                    Activity.distance >= lo,
+                    Activity.distance <= hi,
+                    Activity.moving_time > 0,
+                    extract("year", Activity.start_date) == yr,
+                )
+                .order_by(Activity.moving_time.asc())
+                .first()
+            )
+            row[key] = _one(best) if best else None
+
+        longest = (
+            db.query(Activity)
+            .filter(
+                Activity.activity_type.in_(list(_RUN_TYPES)),
+                Activity.distance > 0,
+                extract("year", Activity.start_date) == yr,
+            )
+            .order_by(Activity.distance.desc())
+            .first()
+        )
+        row["longest"] = _one(longest) if longest else None
+        result_years.append(row)
+
+    return {"years": result_years}
 
 
 @app.delete("/ai/chat/memory")
