@@ -870,7 +870,7 @@ async def get_best_efforts(db: Session = Depends(get_db)) -> Dict[str, Any]:
                 Activity.distance <= hi,
                 Activity.moving_time > 0,
             )
-            .order_by(Activity.moving_time.asc())
+            .order_by((Activity.moving_time / Activity.distance).asc())
             .limit(3)
             .all()
         )
@@ -968,7 +968,7 @@ async def get_best_efforts_yearly(db: Session = Depends(get_db)) -> Dict[str, An
                     Activity.moving_time > 0,
                     extract("year", Activity.start_date) == yr,
                 )
-                .order_by(Activity.moving_time.asc())
+                .order_by((Activity.moving_time / Activity.distance).asc())
                 .first()
             )
             row[key] = _one(best) if best else None
