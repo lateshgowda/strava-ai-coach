@@ -917,7 +917,7 @@ async def get_best_efforts(db: Session = Depends(get_db)) -> Dict[str, Any]:
 async def get_best_efforts_yearly(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Best effort per year for 5K, 10K, 21K and longest run."""
     from backend.models.activity import Activity
-    from sqlalchemy import extract
+    from sqlalchemy import extract, func
 
     _RUN_TYPES = {"Run", "TrailRun", "VirtualRun", "Race"}
 
@@ -984,6 +984,18 @@ async def get_best_efforts_yearly(db: Session = Depends(get_db)) -> Dict[str, An
             .first()
         )
         row["longest"] = _one(longest) if longest else None
+
+        total_km = (
+            db.query(func.sum(Activity.distance))
+            .filter(
+                Activity.activity_type.in_(list(_RUN_TYPES)),
+                extract("year", Activity.start_date) == yr,
+                Activity.distance > 0,
+            )
+            .scalar()
+        )
+        row["total_km"] = round((total_km or 0) / 1000.0, 1)
+
         result_years.append(row)
 
     return {"years": result_years}

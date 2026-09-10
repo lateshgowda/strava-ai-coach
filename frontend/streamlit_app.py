@@ -975,21 +975,27 @@ def render_best_efforts_tab() -> None:
         pr_years[key] = best_yr
 
     # Header row
-    hcols = st.columns([1, 2, 2, 2, 2])
+    hcols = st.columns([1, 1.5, 2, 2, 2, 2])
     hcols[0].markdown("**Year**")
+    hcols[1].markdown("**Total KM**")
     for i, (_, label) in enumerate(_BE_COLS):
-        hcols[i + 1].markdown(f"**{label}**")
+        hcols[i + 2].markdown(f"**{label}**")
 
     st.markdown("<hr style='margin:4px 0;border-color:rgba(255,255,255,0.1)'>", unsafe_allow_html=True)
 
     for row in years:
         yr = row["year"]
-        rcols = st.columns([1, 2, 2, 2, 2])
+        rcols = st.columns([1, 1.5, 2, 2, 2, 2])
         rcols[0].markdown(f"<div style='padding-top:8px;font-weight:600'>{yr}</div>", unsafe_allow_html=True)
+        total_km = row.get("total_km", 0) or 0
+        rcols[1].markdown(
+            f"<div style='padding-top:8px;font-size:15px;font-weight:600'>{total_km:,.0f} km</div>",
+            unsafe_allow_html=True,
+        )
         for i, (key, _) in enumerate(_BE_COLS):
             show_dist = key == "longest"
             is_pr = pr_years.get(key) == yr
-            rcols[i + 1].markdown(_be_cell(row.get(key), show_dist=show_dist, is_pr=is_pr), unsafe_allow_html=True)
+            rcols[i + 2].markdown(_be_cell(row.get(key), show_dist=show_dist, is_pr=is_pr), unsafe_allow_html=True)
         st.markdown("<hr style='margin:2px 0;border-color:rgba(255,255,255,0.06)'>", unsafe_allow_html=True)
 
 
