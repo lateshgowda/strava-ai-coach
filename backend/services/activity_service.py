@@ -274,7 +274,7 @@ class ActivityService:
                 "pace": latest.get("pace_str"),
                 "time": latest.get("moving_time_str"),
                 "average_hr": latest.get("average_heartrate"),
-                "cadence": latest.get("average_cadence"),
+                "cadence": round(latest["average_cadence"] * 2) if latest.get("average_cadence") else None,
                 "elevation_gain_m": latest.get("elevation_gain"),
             },
             "training_load": {

@@ -493,13 +493,13 @@ class TrainingStateEngine:
         ].head(20).copy().sort_values("start_date")
         if len(df) < 3:
             return empty
-        avg_cad = float(df["average_cadence"].mean())
+        avg_cad = float(df["average_cadence"].mean())  # strides/min (raw Strava)
         x = np.arange(len(df), dtype=float)
         slope = float(np.polyfit(x, df["average_cadence"].values, 1)[0])
-        # Improving = moving toward 170-180 range
-        if avg_cad < 170 and slope > 0.1:
+        # Thresholds in strides/min (85-90 = 170-180 SPM)
+        if avg_cad < 85 and slope > 0.1:
             trend = "improving"
-        elif avg_cad > 180 and slope < -0.1:
+        elif avg_cad > 90 and slope < -0.1:
             trend = "improving"
         elif slope < -0.2:
             trend = "declining"
@@ -507,9 +507,11 @@ class TrainingStateEngine:
             trend = "stable"
         chart_data = df[["start_date", "average_cadence", "name"]].copy()
         chart_data["start_date"] = chart_data["start_date"].dt.strftime("%Y-%m-%d")
+        # Double to convert strides/min → SPM for display
+        chart_data["average_cadence"] = (chart_data["average_cadence"] * 2).round(1)
         return {
             "trend": trend,
-            "avg_cadence": round(avg_cad, 1),
+            "avg_cadence": round(avg_cad * 2, 1),
             "slope": round(slope, 3),
             "data": chart_data.to_dict("records"),
         }

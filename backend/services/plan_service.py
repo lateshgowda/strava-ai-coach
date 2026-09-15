@@ -195,7 +195,7 @@ def get_week_data(db: Session, iso_week: str) -> Dict[str, Any]:
                 "distance_km": dist_km,
                 "avg_hr": round(matched.average_heartrate) if matched.average_heartrate else None,
                 "pace": _format_pace(matched.moving_time, matched.distance),
-                "spm": round(matched.average_cadence) if matched.average_cadence else None,
+                "spm": round(matched.average_cadence * 2) if matched.average_cadence else None,
             }
 
         saved_review = None
@@ -248,12 +248,14 @@ def get_all_weeks(db: Session) -> List[Dict[str, Any]]:
     today = date.today()
     weeks = []
     for row in rows:
-        week_start = row.week_start
-        week_end = week_start + timedelta(days=6)
+        # Use actual ISO week Monday→Sunday, not min(plan_date)+6
+        yr, wk = row.iso_week.split("-W")
+        iso_monday = date.fromisocalendar(int(yr), int(wk), 1)
+        iso_sunday = date.fromisocalendar(int(yr), int(wk), 7)
 
-        if week_end < today - timedelta(days=1):
+        if iso_sunday < today:
             phase = "past"
-        elif week_start <= today <= week_end + timedelta(days=1):
+        elif iso_monday <= today <= iso_sunday:
             phase = "current"
         else:
             phase = "future"
@@ -393,7 +395,7 @@ def get_month_data(db: Session, year_month: str) -> Dict[str, Any]:
                 "distance_km": dist_km,
                 "avg_hr": round(matched.average_heartrate) if matched.average_heartrate else None,
                 "pace": _format_pace(matched.moving_time, matched.distance),
-                "spm": round(matched.average_cadence) if matched.average_cadence else None,
+                "spm": round(matched.average_cadence * 2) if matched.average_cadence else None,
             }
             completed += 1
         elif status == "missed":

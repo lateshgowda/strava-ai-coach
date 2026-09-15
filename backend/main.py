@@ -740,7 +740,7 @@ async def plan_run_review_endpoint(
             if activity.moving_time and activity.distance and activity.distance > 0
             else None
         ),
-        "spm": round(activity.average_cadence) if activity.average_cadence else None,
+        "spm": round(activity.average_cadence * 2) if activity.average_cadence else None,
     }
 
     review_text = generate_plan_run_review(planned, actual)
@@ -1099,7 +1099,10 @@ async def garmin_push_workout(workout_id: int, db: Session = Depends(get_db)) ->
     token = db.query(GarminToken).first()
     if not token:
         raise HTTPException(status_code=404, detail="Garmin not connected")
-    api = garmin_svc.get_client(token.tokenstore)
+    try:
+        api = garmin_svc.get_client(token.tokenstore)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Garmin session expired — please reconnect in the sidebar.")
     plan_dict = {
         "plan_date": plan.plan_date.isoformat(),
         "distance_km": plan.distance_km,
@@ -1123,7 +1126,10 @@ async def garmin_push_week(iso_week: str, db: Session = Depends(get_db)) -> Dict
     token = db.query(GarminToken).first()
     if not token:
         raise HTTPException(status_code=404, detail="Garmin not connected")
-    api = garmin_svc.get_client(token.tokenstore)
+    try:
+        api = garmin_svc.get_client(token.tokenstore)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Garmin session expired — please reconnect in the sidebar.")
     pushed = []
     errors = []
     for w in workouts:

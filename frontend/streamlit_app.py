@@ -782,16 +782,26 @@ def render_garmin() -> None:
         st.info("Import your FM Plan first (FM Plan tab).")
         return
 
-    from datetime import date as _date
-    today_iso = _date.today().strftime("%G-W%V")
+    from datetime import date as _date, timedelta as _timedelta
+    today = _date.today()
+    today_iso = today.strftime("%G-W%V")
+    next_week_iso = (today + _timedelta(weeks=1)).strftime("%G-W%V")
+
+    week_choice = st.radio(
+        "Week to push",
+        [f"This week ({today_iso})", f"Next week ({next_week_iso})"],
+        horizontal=True,
+        key="garmin_week_choice",
+    )
+    selected_iso = next_week_iso if "Next week" in week_choice else today_iso
 
     push_col1, push_col2 = st.columns([2, 1])
     with push_col1:
-        st.markdown(f"Push this week's workouts ({today_iso}) to your Forerunner 645:")
+        st.markdown(f"Push workouts for **{selected_iso}** to your Forerunner 645:")
     with push_col2:
-        if st.button("Push This Week", type="primary", use_container_width=True):
+        if st.button("Push Week", type="primary", use_container_width=True):
             with st.spinner("Pushing workouts to Garmin calendar…"):
-                pr = requests.post(f"{BACKEND_URL}/garmin/push-week/{today_iso}", timeout=60)
+                pr = requests.post(f"{BACKEND_URL}/garmin/push-week/{selected_iso}", timeout=60)
             if pr.status_code == 200:
                 res = pr.json()
                 st.success(f"Pushed {res.get('pushed', 0)} workout(s) to your watch calendar.")
@@ -804,24 +814,28 @@ def render_garmin() -> None:
                 st.error(f"Push failed: {pr.text[:200]}")
 
     # Individual workout push
-    week_data = _api_get(f"/plan/week/{today_iso}")
+    week_data = _api_get(f"/plan/week/{selected_iso}")
     if week_data and week_data.get("workouts"):
-        st.markdown("**Individual workouts this week:**")
-        for w in week_data["workouts"]:
-            if w["status"] == "upcoming":
-                wcol1, wcol2 = st.columns([3, 1])
-                wcol1.markdown(
-                    f"{w['plan_date']} — {w['session_type']} {w['distance_km']:.1f}km"
-                    + (f" · _{w['details']}_" if w.get("details") else "")
-                )
-                if wcol2.button("Push", key=f"push_w_{w['id']}", use_container_width=True):
-                    with st.spinner("Pushing…"):
-                        pr2 = requests.post(f"{BACKEND_URL}/garmin/push-workout/{w['id']}", timeout=30)
-                    if pr2.status_code == 200:
-                        r2 = pr2.json()
-                        st.success(f"Pushed '{r2.get('name')}' to watch for {r2.get('scheduled')}.")
-                    else:
-                        st.error(f"Push failed: {pr2.text[:200]}")
+        st.markdown(f"**Individual workouts — {selected_iso}:**")
+        upcoming = [w for w in week_data["workouts"] if w["status"] == "upcoming"]
+        if not upcoming:
+            st.info("No upcoming workouts in this week (all completed or missed).")
+        for w in upcoming:
+            wcol1, wcol2 = st.columns([3, 1])
+            wcol1.markdown(
+                f"{w['plan_date']} — {w['session_type']} {w['distance_km']:.1f}km"
+                + (f" · _{w['details']}_" if w.get("details") else "")
+            )
+            if wcol2.button("Push", key=f"push_w_{w['id']}", use_container_width=True):
+                with st.spinner("Pushing…"):
+                    pr2 = requests.post(f"{BACKEND_URL}/garmin/push-workout/{w['id']}", timeout=30)
+                if pr2.status_code == 200:
+                    r2 = pr2.json()
+                    st.success(f"Pushed '{r2.get('name')}' to watch for {r2.get('scheduled')}.")
+                else:
+                    st.error(f"Push failed: {pr2.text[:200]}")
+    elif week_data is not None:
+        st.info(f"No workouts planned for {selected_iso}.")
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +956,16 @@ def _be_cell(e: Optional[Dict[str, Any]], show_dist: bool = False, is_pr: bool =
     )
 
 
+def _fmt_be_date(date_str: Optional[str]) -> str:
+    if not date_str:
+        return "–"
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(date_str, "%Y-%m-%d").strftime("%-d %b")
+    except Exception:
+        return date_str[:7]
+
+
 def render_best_efforts_tab() -> None:
     data = _api_get("/best-efforts/yearly")
     if not data:
@@ -953,11 +977,13 @@ def render_best_efforts_tab() -> None:
         st.info("No activity data yet.")
         return
 
-    # Find PR year per column
+    # Find PR year + best entry per column
     pr_years: Dict[str, Optional[int]] = {}
+    pr_entries: Dict[str, Any] = {}
     for key, _ in _BE_COLS:
         best_val = None
         best_yr = None
+        best_entry = None
         for row in years:
             e = row.get(key)
             if not e:
@@ -967,36 +993,90 @@ def render_best_efforts_tab() -> None:
                 if best_val is None or val > best_val:
                     best_val = val
                     best_yr = row["year"]
+                    best_entry = e
             else:
                 val = _parse_time_secs(e.get("time_str", ""))
                 if best_val is None or val < best_val:
                     best_val = val
                     best_yr = row["year"]
+                    best_entry = e
         pr_years[key] = best_yr
+        pr_entries[key] = best_entry
 
-    # Header row
-    hcols = st.columns([1, 1.5, 2, 2, 2, 2])
-    hcols[0].markdown("**Year**")
-    hcols[1].markdown("**Total KM**")
-    for i, (_, label) in enumerate(_BE_COLS):
-        hcols[i + 2].markdown(f"**{label}**")
+    import plotly.graph_objects as _go
 
-    st.markdown("<hr style='margin:4px 0;border-color:rgba(255,255,255,0.1)'>", unsafe_allow_html=True)
+    PR_CELL_BG = "rgba(120,90,0,0.85)"
+    ROW_EVEN   = "rgba(45,55,72,0.8)"
+    ROW_ODD    = "rgba(26,32,44,0.8)"
+    sub_hdr    = "Time | Pace | HR | Date"
 
-    for row in years:
+    col_labels = [
+        "Year",
+        "Total KM",
+        f"5 K\n{sub_hdr}",
+        f"10 K\n{sub_hdr}",
+        f"Half Marathon\n{sub_hdr}",
+        f"Longest\nDist | Pace | HR | Date",
+    ]
+
+    cell_vals: List[List[str]] = [[] for _ in col_labels]
+    fill_cols: List[List[str]] = [[] for _ in col_labels]
+
+    for idx, row in enumerate(years):
         yr = row["year"]
-        rcols = st.columns([1, 1.5, 2, 2, 2, 2])
-        rcols[0].markdown(f"<div style='padding-top:8px;font-weight:600'>{yr}</div>", unsafe_allow_html=True)
         total_km = row.get("total_km", 0) or 0
-        rcols[1].markdown(
-            f"<div style='padding-top:8px;font-size:15px;font-weight:600'>{total_km:,.0f} km</div>",
-            unsafe_allow_html=True,
-        )
-        for i, (key, _) in enumerate(_BE_COLS):
-            show_dist = key == "longest"
+        base_bg = ROW_EVEN if idx % 2 == 0 else ROW_ODD
+
+        cell_vals[0].append(str(yr))
+        cell_vals[1].append(f"{total_km:,.0f} km")
+        fill_cols[0].append(base_bg)
+        fill_cols[1].append(base_bg)
+
+        for ci, (key, _) in enumerate(_BE_COLS):
+            e = row.get(key)
             is_pr = pr_years.get(key) == yr
-            rcols[i + 2].markdown(_be_cell(row.get(key), show_dist=show_dist, is_pr=is_pr), unsafe_allow_html=True)
-        st.markdown("<hr style='margin:2px 0;border-color:rgba(255,255,255,0.06)'>", unsafe_allow_html=True)
+            cell_bg = PR_CELL_BG if is_pr else base_bg
+            if not e:
+                cell_vals[ci + 2].append("–")
+            else:
+                pr_mark = " 🏆" if is_pr else ""
+                pace = e.get("pace") or "–"
+                hr   = f"{e['avg_hr']} bpm" if e.get("avg_hr") else "–"
+                date = _fmt_be_date(e.get("date"))
+                if key == "longest":
+                    primary = f"{e.get('distance_km', 0):.1f} km{pr_mark}"
+                else:
+                    primary = f"{e.get('time_str', '–')}{pr_mark}"
+                cell_vals[ci + 2].append(f"{primary} | {pace}/km | {hr} | {date}")
+            fill_cols[ci + 2].append(cell_bg)
+
+    row_height = 40
+    fig = _go.Figure(data=[_go.Table(
+        columnwidth=[50, 70, 130, 130, 160, 160],
+        header=dict(
+            values=[f"<b>{c}</b>" for c in col_labels],
+            fill_color="rgba(30,40,55,1.0)",
+            font=dict(color="#f7fafc", size=12),
+            align=["center", "center", "left", "left", "left", "left"],
+            height=46,
+            line_color="rgba(255,255,255,0.15)",
+        ),
+        cells=dict(
+            values=cell_vals,
+            fill_color=fill_cols,
+            font=dict(color="#f7fafc", size=13),
+            align=["center", "center", "left", "left", "left", "left"],
+            height=row_height,
+            line_color="rgba(255,255,255,0.08)",
+        ),
+    )])
+    fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=row_height * len(years) + 110,
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2635,7 +2715,7 @@ def render_fm_plan() -> None:
         strava_id = actual["strava_id"] if actual else None
 
         with st.container(border=True):
-            row_top = st.columns([3, 2, 2, 1])
+            row_top = st.columns([3, 2, 2])
             with row_top[0]:
                 st.markdown(
                     f"{_plan_badge(status)}&nbsp;&nbsp;<b>{workout['plan_date']}</b>",
@@ -2659,12 +2739,17 @@ def render_fm_plan() -> None:
                     st.metric("Avg HR", f"{hr} bpm" if hr else "N/A")
                     st.metric("SPM", spm if spm else "N/A")
 
-            with row_top[3]:
-                if status == "completed" and strava_id:
-                    review_key = f"plan_review_{strava_id}"
-                    cached_review = workout.get("ai_review")
-                    if not cached_review and review_key not in st.session_state:
-                        if st.button("AI Review", key=f"btn_review_{strava_id}"):
+            # AI Review — collapsible so all 3 runs of the week stay visible
+            if status == "completed" and strava_id:
+                review_key = f"plan_review_{strava_id}"
+                review_text = (
+                    workout.get("ai_review")
+                    or st.session_state.get(review_key)
+                )
+                expander_label = "🤖 AI Review ✓" if review_text else "🤖 AI Review"
+                with st.expander(expander_label, expanded=False):
+                    if not review_text:
+                        if st.button("Generate AI Review", key=f"btn_review_{strava_id}"):
                             with st.spinner("Generating…"):
                                 r = requests.post(
                                     f"{BACKEND_URL}/plan/review/{strava_id}",
@@ -2673,17 +2758,11 @@ def render_fm_plan() -> None:
                             if r.status_code == 200:
                                 st.session_state[review_key] = r.json()["review"]
                             st.rerun()
-
-            # Show review (either from DB or generated this session)
-            review_text = (
-                workout.get("ai_review")
-                or st.session_state.get(f"plan_review_{strava_id}")
-            )
-            if review_text:
-                st.markdown(
-                    f'<div class="insight-box">{review_text}</div>',
-                    unsafe_allow_html=True,
-                )
+                    else:
+                        st.markdown(
+                            f'<div class="insight-box">{review_text}</div>',
+                            unsafe_allow_html=True,
+                        )
 
     # ---- weekly AI summary ----
     st.markdown("---")
