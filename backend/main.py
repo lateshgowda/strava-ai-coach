@@ -742,7 +742,7 @@ async def plan_report_endpoint(db: Session = Depends(get_db)):
 
     headers = [
         "Date", "Planned (km)", "Session Type", "Details",
-        "Status", "Actual (km)", "Weekly Vol (km)", "Monthly Vol (km)",
+        "Status", "Actual (km)", "Weekly Vol (km) Planned", "Monthly Vol (km) Planned",
     ]
     hdr_fill = PatternFill("solid", fgColor="2D3748")
     hdr_font = Font(bold=True, color="F7FAFC")
