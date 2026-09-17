@@ -1248,7 +1248,7 @@ def render_trends(_data: Dict[str, Any]) -> None:
             bgcolor="rgba(45,55,72,0.8)",
             activecolor="#38b2ac",
             font=dict(color="#e2e8f0", size=11),
-            x=0, y=1.02, xanchor="left", yanchor="bottom",
+            x=1, y=1.0, xanchor="right", yanchor="bottom",
         )
 
     fig.update_layout(
