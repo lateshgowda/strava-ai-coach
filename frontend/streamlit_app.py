@@ -1102,7 +1102,7 @@ def render_latest_run(data: Dict[str, Any]) -> None:
     hr = latest.get("average_heartrate")
     col4.metric("Avg HR", f"{hr:.0f} bpm" if hr else "–")
 
-    cadence = latest.get("average_cadence")
+    cadence = latest.get("cadence") or (latest.get("average_cadence", 0) * 2 or None)
     col5.metric("Cadence", f"{cadence:.0f} spm" if cadence else "–")
 
     elev = latest.get("elevation_gain", 0)
@@ -1201,7 +1201,9 @@ def render_trends(_data: Dict[str, Any]) -> None:
     sel_meta = next(m for m in _METRICS if m[0] == sel_key)
     sel_label, sel_unit, sel_fmt = sel_meta[1], sel_meta[2], sel_meta[3]
 
-    xs = [t["display"] for t in trends]
+    # Use period_date for datetime x-axis; fall back to display if missing
+    xs_dates  = [t.get("period_date") or t["display"] for t in trends]
+    xs_labels = [t["display"] for t in trends]
     ys = [t.get(sel_key) for t in trends]
     cur_idx = next((i for i, t in enumerate(trends) if t.get("is_current")), len(trends) - 1)
 
@@ -1214,44 +1216,60 @@ def render_trends(_data: Dict[str, Any]) -> None:
 
     import plotly.graph_objects as _go
 
-    # Open circle for past periods, filled dark circle for current
-    marker_colors = ["#1a202c" if i == cur_idx else "rgba(0,0,0,0)" for i in range(len(xs))]
-    marker_sizes = [10 if i == cur_idx else 7 for i in range(len(xs))]
+    marker_colors = ["#1a202c" if i == cur_idx else "rgba(0,0,0,0)" for i in range(len(xs_dates))]
+    marker_sizes  = [10 if i == cur_idx else 7 for i in range(len(xs_dates))]
 
     fig = _go.Figure()
     fig.add_trace(_go.Scatter(
-        x=xs,
+        x=xs_dates,
         y=ys,
         mode="lines+markers",
         line=dict(color="#38b2ac", width=2.5),
         fill="tozeroy",
         fillcolor="rgba(56,178,172,0.12)",
-        marker=dict(
-            size=marker_sizes,
-            color=marker_colors,
-            line=dict(color="#38b2ac", width=2),
-        ),
-        hovertemplate=f"%{{x}}<br>{sel_label}: %{{y:.1f}} {sel_unit}<extra></extra>",
+        marker=dict(size=marker_sizes, color=marker_colors, line=dict(color="#38b2ac", width=2)),
+        text=xs_labels,
+        hovertemplate=f"%{{text}}<br>{sel_label}: %{{y:.1f}} {sel_unit}<extra></extra>",
     ))
 
-    if cur_idx < len(xs):
-        fig.add_vline(x=xs[cur_idx], line_width=1.5, line_color="rgba(45,55,72,0.8)")
+    if cur_idx < len(xs_dates):
+        fig.add_vline(x=xs_dates[cur_idx], line_width=1.5, line_color="rgba(45,55,72,0.8)")
+
+    # Range selector buttons (only meaningful for week/month — years have few points)
+    rangeselector = None
+    if period_key in ("week", "month"):
+        rangeselector = dict(
+            buttons=[
+                dict(count=3,  label="3M", step="month", stepmode="backward"),
+                dict(count=6,  label="6M", step="month", stepmode="backward"),
+                dict(count=1,  label="1Y", step="year",  stepmode="backward"),
+                dict(step="all", label="All"),
+            ],
+            bgcolor="rgba(45,55,72,0.8)",
+            activecolor="#38b2ac",
+            font=dict(color="#e2e8f0", size=11),
+            x=0, y=1.02, xanchor="left", yanchor="bottom",
+        )
 
     fig.update_layout(
         title=dict(
             text=f"<b style='font-size:17px'>{sel_label}</b>"
                  + (f"<br><span style='font-size:12px;color:#718096'>{avg_str}</span>" if avg_str else ""),
-            x=0,
-            xanchor="left",
-            font=dict(color="#e2e8f0"),
+            x=0, xanchor="left", font=dict(color="#e2e8f0"),
         ),
-        height=300,
-        margin=dict(l=0, r=16, t=56, b=0),
+        height=360,
+        margin=dict(l=0, r=16, t=72, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#ccc", size=11),
         showlegend=False,
-        xaxis=dict(showgrid=False, tickangle=-30 if period_key == "week" else 0),
+        xaxis=dict(
+            showgrid=False,
+            tickangle=-30 if period_key == "week" else 0,
+            rangeselector=rangeselector,
+            rangeslider=dict(visible=True, thickness=0.06, bgcolor="rgba(45,55,72,0.4)"),
+            type="date",
+        ),
         yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)", zeroline=False),
         hovermode="x unified",
     )
@@ -1814,7 +1832,7 @@ def render_all_activities(data: Dict[str, Any]) -> None:
     display_df["Avg HR"] = display_df["Avg HR"].apply(lambda x: f"{x:.0f}" if pd.notna(x) and x else "–")
     display_df["Type"] = display_df["Type"].apply(lambda t: f"{_TYPE_ICONS.get(t, '🏅')} {t}")
     if "SPM" in display_df.columns:
-        display_df["SPM"] = display_df["SPM"].apply(lambda x: f"{x:.0f}" if pd.notna(x) and x else "–")
+        display_df["SPM"] = display_df["SPM"].apply(lambda x: f"{x*2:.0f}" if pd.notna(x) and x else "–")
 
     st.dataframe(
         display_df,

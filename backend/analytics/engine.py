@@ -157,13 +157,14 @@ class AnalyticsEngine:
         return df.sort_values("start_date")
 
     def cadence_trend(self, runs: int = 20) -> pd.DataFrame:
-        """Last *runs* activities that have cadence data."""
+        """Last *runs* activities that have cadence data. Cadence doubled to SPM."""
         empty = pd.DataFrame(columns=["start_date", "distance_km", "average_cadence", "name"])
         if self.df.empty:
             return empty
         df = self.df.dropna(subset=["average_cadence"]).head(runs)[
             ["start_date", "distance_km", "average_cadence", "name"]
         ].copy()
+        df["average_cadence"] = (df["average_cadence"] * 2).round()
         return df.sort_values("start_date")
 
     # ------------------------------------------------------------------
@@ -500,16 +501,12 @@ class AnalyticsEngine:
         df = self.df.copy()
 
         if period == "week":
-            cutoff = datetime.utcnow() - timedelta(weeks=16)
-            df = df[df["start_date"] >= pd.Timestamp(cutoff)]
             group_col = "week"
         elif period == "year":
             df = df.copy()
             df["year"] = df["start_date"].dt.year.astype(str)
             group_col = "year"
         else:
-            cutoff = datetime.utcnow() - timedelta(days=12 * 30)
-            df = df[df["start_date"] >= pd.Timestamp(cutoff)]
             group_col = "month"
 
         if df.empty:
@@ -556,6 +553,21 @@ class AnalyticsEngine:
 
         agg["display"] = agg[group_col].apply(_display)
 
+        def _period_date(key: str) -> str:
+            """ISO date string for the start of this period (for Plotly datetime axis)."""
+            try:
+                if period == "week":
+                    yr, wk = key.split("-W")
+                    return datetime.strptime(f"{yr}-{int(wk):02d}-1", "%G-%V-%u").strftime("%Y-%m-%d")
+                elif period == "month":
+                    return f"{key}-01"
+                else:
+                    return f"{key}-01-01"
+            except Exception:
+                return key
+
+        agg["period_date"] = agg[group_col].apply(_period_date)
+
         now = datetime.utcnow()
         if period == "week":
             current_key = now.strftime("%G-W%V")
@@ -567,7 +579,7 @@ class AnalyticsEngine:
         agg["is_current"] = agg[group_col] == current_key
         agg.rename(columns={group_col: "label"}, inplace=True)
 
-        keep = ["label", "display", "distance_km", "avg_pace", "activities",
+        keep = ["label", "display", "period_date", "distance_km", "avg_pace", "activities",
                 "elevation_m", "moving_time_sec", "avg_hr", "is_current"]
         return agg[[c for c in keep if c in agg.columns]].to_dict(orient="records")
 
