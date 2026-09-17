@@ -677,6 +677,118 @@ async def plan_download_endpoint():
     )
 
 
+@app.get("/plan/report")
+async def plan_report_endpoint(db: Session = Depends(get_db)):
+    """Generate enriched FM plan xlsx with weekly/monthly volumes and colour coding."""
+    import io
+    from collections import defaultdict
+    from fastapi.responses import StreamingResponse
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+    from backend.models.training_plan import TrainingPlan
+    from backend.models.activity import Activity
+    from backend.services.plan_service import _RUN_TYPES, find_matching_activity, workout_status
+
+    workouts = db.query(TrainingPlan).order_by(TrainingPlan.plan_date).all()
+    if not workouts:
+        raise HTTPException(status_code=404, detail="No plan data found")
+
+    # Aggregate actual km by week and month from all run activities (single query)
+    activities = (
+        db.query(Activity)
+        .filter(Activity.activity_type.in_(list(_RUN_TYPES)))
+        .all()
+    )
+    week_actual: dict = defaultdict(float)
+    month_actual: dict = defaultdict(float)
+    for act in activities:
+        if act.distance:
+            km = act.distance / 1000.0
+            week_actual[act.start_date.strftime("%G-W%V")] += km
+            month_actual[act.start_date.strftime("%Y-%m")] += km
+
+    # Planned totals per week and month
+    week_planned: dict = defaultdict(float)
+    month_planned: dict = defaultdict(float)
+    for w in workouts:
+        week_planned[w.iso_week] += w.distance_km
+        month_planned[w.plan_date.strftime("%Y-%m")] += w.distance_km
+
+    def _fill(planned: float, actual: float) -> Optional[PatternFill]:
+        if planned <= 0:
+            return None
+        pct = actual / planned
+        if pct >= 1.0:
+            return PatternFill("solid", fgColor="90EE90")   # green
+        if pct >= 0.8:
+            return PatternFill("solid", fgColor="FFB347")   # amber
+        if pct < 0.5:
+            return PatternFill("solid", fgColor="FFFF99")   # yellow
+        return None  # 50–79 %: no highlight
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "FM Plan"
+
+    headers = [
+        "Date", "Planned (km)", "Session Type", "Details",
+        "Status", "Actual (km)", "Weekly Vol (km)", "Monthly Vol (km)",
+    ]
+    hdr_fill = PatternFill("solid", fgColor="2D3748")
+    hdr_font = Font(bold=True, color="F7FAFC")
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for ri, w in enumerate(workouts, 2):
+        matched = find_matching_activity(db, w.plan_date, w.distance_km)
+        status = workout_status(w, matched)
+        actual_dist = round((matched.distance or 0) / 1000.0, 2) if matched else None
+        ym = w.plan_date.strftime("%Y-%m")
+        w_plan = round(week_planned[w.iso_week], 1)
+        m_plan = round(month_planned[ym], 1)
+
+        row = [
+            w.plan_date.strftime("%d %b %Y"),
+            w.distance_km,
+            w.session_type,
+            w.details or "",
+            status,
+            actual_dist,
+            w_plan,
+            m_plan,
+        ]
+        for ci, val in enumerate(row, 1):
+            ws.cell(row=ri, column=ci, value=val)
+
+        wf = _fill(w_plan, week_actual[w.iso_week])
+        if wf:
+            ws.cell(row=ri, column=7).fill = wf
+
+        mf = _fill(m_plan, month_actual[ym])
+        if mf:
+            ws.cell(row=ri, column=8).fill = mf
+
+    # Auto column widths
+    for col in ws.columns:
+        width = max((len(str(c.value or "")) for c in col), default=8)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(width + 4, 45)
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="FM_Plan_Report.xlsx"'},
+    )
+
+
 @app.get("/plan/status")
 async def plan_status_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Return high-level FM plan statistics (no activity matching)."""

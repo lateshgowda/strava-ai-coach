@@ -2625,12 +2625,12 @@ def render_fm_plan() -> None:
     hdr_col.caption("Full marathon training plan — Sep 2026 → Sep 2027 target.")
     with dl_col:
         try:
-            xlsx_resp = requests.get(f"{BACKEND_URL}/plan/download", timeout=10)
+            xlsx_resp = requests.get(f"{BACKEND_URL}/plan/report", timeout=30)
             if xlsx_resp.status_code == 200:
                 st.download_button(
                     label="⬇️ Spreadsheet",
                     data=xlsx_resp.content,
-                    file_name="Latesh_FM_Plan.xlsx",
+                    file_name="FM_Plan_Report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
