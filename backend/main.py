@@ -715,6 +715,15 @@ async def plan_report_endpoint(db: Session = Depends(get_db)):
         week_planned[w.iso_week] += w.distance_km
         month_planned[w.plan_date.strftime("%Y-%m")] += w.distance_km
 
+    # Only the last workout in each week / month shows the volume cell
+    last_in_week: dict = {}
+    last_in_month: dict = {}
+    for w in workouts:
+        last_in_week[w.iso_week] = w.id
+        last_in_month[w.plan_date.strftime("%Y-%m")] = w.id
+    week_last_ids = set(last_in_week.values())
+    month_last_ids = set(last_in_month.values())
+
     def _fill(planned: float, actual: float) -> Optional[PatternFill]:
         if planned <= 0:
             return None
@@ -751,6 +760,9 @@ async def plan_report_endpoint(db: Session = Depends(get_db)):
         w_plan = round(week_planned[w.iso_week], 1)
         m_plan = round(month_planned[ym], 1)
 
+        is_week_last  = w.id in week_last_ids
+        is_month_last = w.id in month_last_ids
+
         row = [
             w.plan_date.strftime("%d %b %Y"),
             w.distance_km,
@@ -758,19 +770,21 @@ async def plan_report_endpoint(db: Session = Depends(get_db)):
             w.details or "",
             status,
             actual_dist,
-            w_plan,
-            m_plan,
+            w_plan if is_week_last else None,
+            m_plan if is_month_last else None,
         ]
         for ci, val in enumerate(row, 1):
             ws.cell(row=ri, column=ci, value=val)
 
-        wf = _fill(w_plan, week_actual[w.iso_week])
-        if wf:
-            ws.cell(row=ri, column=7).fill = wf
+        if is_week_last:
+            wf = _fill(w_plan, week_actual[w.iso_week])
+            if wf:
+                ws.cell(row=ri, column=7).fill = wf
 
-        mf = _fill(m_plan, month_actual[ym])
-        if mf:
-            ws.cell(row=ri, column=8).fill = mf
+        if is_month_last:
+            mf = _fill(m_plan, month_actual[ym])
+            if mf:
+                ws.cell(row=ri, column=8).fill = mf
 
     # Auto column widths
     for col in ws.columns:
