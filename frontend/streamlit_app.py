@@ -1607,18 +1607,11 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         )
         st.markdown("")
 
-    # --- Sleep & Recovery (Apple Health first, Garmin fallback) ---
+    # --- Sleep & Recovery (Garmin) ---
     st.markdown("---")
-    today_health = data.get("today_health")
     _garmin_td = data.get("garmin_today") or {}
 
-    # Merge: use Apple Health when available, Garmin as fallback
-    _sleep_src = "Apple Health"
-    if today_health and any(today_health.get(k) for k in (
-        "sleep_duration_hours", "sleep_deep_hours", "sleep_rem_hours", "resting_hr"
-    )):
-        h = today_health
-    elif _garmin_td.get("sleep_duration_hours"):
+    if _garmin_td.get("sleep_duration_hours"):
         h = {
             "sleep_duration_hours": _garmin_td.get("sleep_duration_hours"),
             "sleep_deep_hours": _garmin_td.get("sleep_deep_hours"),
@@ -1627,11 +1620,10 @@ def render_fatigue(data: Dict[str, Any]) -> None:
             "sleep_awake_hours": None,
             "resting_hr": _garmin_td.get("resting_hr"),
         }
-        _sleep_src = "Garmin"
     else:
         h = None
 
-    st.subheader(f"Last Night's Sleep & Recovery {'(Garmin)' if _sleep_src == 'Garmin' else ''}")
+    st.subheader("Last Night's Sleep & Recovery")
     if h:
         sleep_total = h.get("sleep_duration_hours")
         sleep_deep = h.get("sleep_deep_hours")
@@ -1718,8 +1710,7 @@ def render_fatigue(data: Dict[str, Any]) -> None:
         st.markdown(
             '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
             'border-radius:6px;padding:12px 16px;color:#A0AEC0;">'
-            'No sleep data for today yet. Sync Garmin data or set up the iOS Shortcut to '
-            'automatically improve readiness accuracy.'
+            'No sleep data for today yet — click <b>Sync Garmin Data</b> in the sidebar.'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -2516,32 +2507,21 @@ def render_profile() -> None:
 
 
 def render_sleep() -> None:
-    st.subheader("Sleep & Health Sync")
+    st.subheader("Sleep History")
 
-    history = get_sleep_history(days=30)
-    _garmin_sleep = None
+    history = get_garmin_sleep_history(days=30)
+    _garmin_sleep = True
 
-    # --- Sync status / Garmin fallback ---
     if not history:
-        # Try Garmin as fallback
-        garmin_history = get_garmin_sleep_history(days=30)
-        if garmin_history:
-            history = garmin_history
-            _garmin_sleep = True
-            st.caption("Showing Garmin sleep data (no Apple Health data synced yet)")
-        else:
-            st.markdown(
-                '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
-                'border-radius:6px;padding:14px 18px;">'
-                '<b>No sleep data synced yet.</b><br/>'
-                'Sync Garmin data or run your iOS Shortcut manually. '
-                'Once data arrives it will appear here.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-            return
-    else:
-        st.caption("Data synced from Apple Health via your iOS Shortcut")
+        st.markdown(
+            '<div style="background:rgba(99,179,237,0.08);border-left:4px solid #63B3ED;'
+            'border-radius:6px;padding:14px 18px;">'
+            '<b>No sleep data synced yet.</b><br/>'
+            'Click <b>Sync Garmin Data</b> in the sidebar to pull your latest sleep metrics.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
 
     # Most recent entry
     latest = history[0]
@@ -2609,14 +2589,14 @@ def render_sleep() -> None:
         c1, c2, c3 = st.columns(3)
         c1.metric("Average Sleep", f"{avg:.1f} h")
         c2.metric("Nights ≥ 7h", f"{nights_ok}/{len(sleep_rows)}")
-        if _garmin_sleep and "sleep_score" in df.columns:
+        if "sleep_score" in df.columns:
             score_rows = df[df["sleep_score"].notna()]
             avg_score = score_rows["sleep_score"].mean() if not score_rows.empty else None
             c3.metric("Avg Sleep Score", f"{avg_score:.0f}/100" if avg_score else "–")
         else:
             c3.metric("Days Synced", len(history))
     else:
-        st.info("Sleep duration data not yet available — sync Garmin or run the iOS Shortcut.")
+        st.info("Sleep duration data not yet available — sync Garmin data from the sidebar.")
 
     # --- Sleep stages stacked bar ---
     stage_rows = df[df[["sleep_deep_hours", "sleep_rem_hours", "sleep_core_hours"]].notna().any(axis=1)]
