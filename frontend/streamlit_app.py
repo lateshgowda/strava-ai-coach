@@ -63,6 +63,48 @@ st.markdown(
         margin: 8px 0;
     }
     .stTabs [data-baseweb="tab"] { font-size: 15px; }
+
+    /* ── Mobile: iPhone / small screens (≤640px) ── */
+    @media screen and (max-width: 640px) {
+        /* Stack all multi-column layouts vertically */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0 !important;
+        }
+        [data-testid="column"] {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        /* Tighter page padding */
+        .block-container {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-top: 0.75rem !important;
+        }
+        /* Smaller metric values so they fit */
+        [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+        [data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
+        /* Tab labels more compact */
+        .stTabs [data-baseweb="tab"] {
+            font-size: 12px !important;
+            padding: 6px 8px !important;
+        }
+        /* Slightly smaller headings */
+        h1 { font-size: 1.4rem !important; }
+        h2 { font-size: 1.15rem !important; }
+        h3 { font-size: 1.05rem !important; }
+        /* Horizontal scroll for wide Plotly tables */
+        [data-testid="stPlotlyChart"] { overflow-x: auto !important; }
+    }
+
+    /* ── Tablet (641px – 768px): 2-per-row ── */
+    @media screen and (min-width: 641px) and (max-width: 768px) {
+        [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+        [data-testid="column"] {
+            min-width: 48% !important;
+            flex: 1 1 48% !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
