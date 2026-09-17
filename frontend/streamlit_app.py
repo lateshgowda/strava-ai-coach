@@ -1249,6 +1249,23 @@ def render_trends(_data: Dict[str, Any]) -> None:
             ))
             prev_i = i
 
+    # Current-period annotation (all metrics, teal — skipped if already a top-3 gold dot)
+    top3_indices = {i for i, v in enumerate(ys) if v is not None and annotations
+                    and any(a["x"] == xs_dates[i] for a in annotations)}
+    if cur_idx < len(ys) and ys[cur_idx] is not None and cur_idx not in top3_indices:
+        cur_val = ys[cur_idx]
+        annotations.append(dict(
+            x=xs_dates[cur_idx], y=cur_val,
+            text=f"<b>{sel_fmt(cur_val)} {sel_unit}</b>".strip(),
+            showarrow=True, arrowhead=2,
+            arrowcolor="#38b2ac",
+            ax=0, ay=-40,
+            font=dict(color="#38b2ac", size=11),
+            bgcolor="rgba(26,32,44,0.85)",
+            bordercolor="rgba(56,178,172,0.5)",
+            borderwidth=1, borderpad=3,
+        ))
+
     fig = _go.Figure()
     fig.add_trace(_go.Scatter(
         x=xs_dates,
