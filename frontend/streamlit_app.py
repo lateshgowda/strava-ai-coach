@@ -1201,7 +1201,6 @@ def render_trends(_data: Dict[str, Any]) -> None:
     sel_meta = next(m for m in _METRICS if m[0] == sel_key)
     sel_label, sel_unit, sel_fmt = sel_meta[1], sel_meta[2], sel_meta[3]
 
-    # Use period_date for datetime x-axis; fall back to display if missing
     xs_dates  = [t.get("period_date") or t["display"] for t in trends]
     xs_labels = [t["display"] for t in trends]
     ys = [t.get(sel_key) for t in trends]
@@ -1216,8 +1215,39 @@ def render_trends(_data: Dict[str, Any]) -> None:
 
     import plotly.graph_objects as _go
 
+    # Base marker styling
     marker_colors = ["#1a202c" if i == cur_idx else "rgba(0,0,0,0)" for i in range(len(xs_dates))]
     marker_sizes  = [10 if i == cur_idx else 7 for i in range(len(xs_dates))]
+
+    # Top-3 distance annotations (computed from full history, shown where visible)
+    annotations: List[Dict] = []
+    if sel_key == "distance_km" and valid_ys:
+        sorted_desc = sorted(valid_ys, reverse=True)
+        threshold = sorted_desc[min(2, len(sorted_desc) - 1)]
+        prev_i = -999
+        ay = -40
+        for i, v in enumerate(ys):
+            if v is None or v < threshold:
+                continue
+            marker_colors[i] = "#ECC94B"
+            marker_sizes[i]  = 12
+            # Alternate height when two top-3 points are close together
+            if i - prev_i <= 3:
+                ay = -70 if ay == -40 else -40
+            else:
+                ay = -40
+            annotations.append(dict(
+                x=xs_dates[i], y=v,
+                text=f"<b>{v:.1f} km</b>",
+                showarrow=True, arrowhead=2,
+                arrowcolor="#ECC94B",
+                ax=0, ay=ay,
+                font=dict(color="#ECC94B", size=11),
+                bgcolor="rgba(26,32,44,0.85)",
+                bordercolor="rgba(236,201,75,0.5)",
+                borderwidth=1, borderpad=3,
+            ))
+            prev_i = i
 
     fig = _go.Figure()
     fig.add_trace(_go.Scatter(
@@ -1235,7 +1265,6 @@ def render_trends(_data: Dict[str, Any]) -> None:
     if cur_idx < len(xs_dates):
         fig.add_vline(x=xs_dates[cur_idx], line_width=1.5, line_color="rgba(45,55,72,0.8)")
 
-    # Range selector buttons (only meaningful for week/month — years have few points)
     rangeselector = None
     if period_key in ("week", "month"):
         rangeselector = dict(
@@ -1257,6 +1286,7 @@ def render_trends(_data: Dict[str, Any]) -> None:
                  + (f"<br><span style='font-size:12px;color:#718096'>{avg_str}</span>" if avg_str else ""),
             x=0, xanchor="left", font=dict(color="#e2e8f0"),
         ),
+        annotations=annotations,
         height=360,
         margin=dict(l=0, r=16, t=72, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
