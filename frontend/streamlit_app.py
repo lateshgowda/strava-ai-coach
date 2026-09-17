@@ -2169,6 +2169,10 @@ def render_training_intelligence(data: Dict[str, Any]) -> None:
 
     st.markdown("---")
 
+    # ── Athlete profile (feeds the adaptive plan) ────────────────────────
+    with st.expander("⚙️ Athlete Profile — click to view / edit"):
+        render_profile()
+
     # ── Adaptive weekly plan ──────────────────────────────────────────────
     st.subheader("This Week's Adaptive Plan")
     if weekly_plan:

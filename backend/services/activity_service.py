@@ -184,16 +184,27 @@ class ActivityService:
             vo2max=_garmin_vo2max,
         )
 
-        weekly_plan = generate_weekly_plan(
+        # Compute actual current week's km from run activities
+        import datetime as _dt_mod
+        _current_iso_week = _dt_mod.date.today().strftime("%G-W%V")
+        _this_week_km = sum(
+            (a.distance or 0) / 1000.0
+            for a in run_activities
+            if a.start_date.strftime("%G-W%V") == _current_iso_week
+        )
+
+        _plan_kwargs = dict(
             acwr=acwr,
             fatigue_score=fatigue,
             recovery_score=recovery,
             readiness_score=readiness["readiness_score"],
-            this_week_km=recent_trend.get("avg_weekly_km_last4w", 0.0),
+            this_week_km=_this_week_km,
             avg_weekly_km_last4w=recent_trend.get("avg_weekly_km_last4w", 20.0),
             consistency_score=training_state["consistency_score"],
             consecutive_training_days=training_status["consecutive_training_days"],
         )
+
+        weekly_plan = generate_weekly_plan(**_plan_kwargs)
 
         # Load athlete profile for context (if set)
         try:
@@ -201,14 +212,7 @@ class ActivityService:
             profile = get_profile(self._db)
             if profile and profile.primary_goal:
                 weekly_plan = generate_weekly_plan(
-                    acwr=acwr,
-                    fatigue_score=fatigue,
-                    recovery_score=recovery,
-                    readiness_score=readiness["readiness_score"],
-                    this_week_km=recent_trend.get("avg_weekly_km_last4w", 0.0),
-                    avg_weekly_km_last4w=recent_trend.get("avg_weekly_km_last4w", 20.0),
-                    consistency_score=training_state["consistency_score"],
-                    consecutive_training_days=training_status["consecutive_training_days"],
+                    **_plan_kwargs,
                     preferred_weekly_km=profile.preferred_weekly_km,
                     primary_goal=profile.primary_goal,
                     target_race_date_days=(
