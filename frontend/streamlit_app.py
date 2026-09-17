@@ -3135,60 +3135,49 @@ def main() -> None:
             render_best_efforts()
 
     # Tabs
-    tab_latest, tab_garmin, tab_trends, tab_be, tab_ai, tab_fatigue, tab_sleep, tab_long, tab_all, tab_intel, tab_workout, tab_plan, tab_profile = st.tabs([
-        "Latest Run",
-        "Garmin",
+    tab_trends, tab_garmin, tab_be, tab_fatigue, tab_ai, tab_intel, tab_all, tab_plan = st.tabs([
         "Trends",
+        "Garmin",
         "Best Efforts",
-        "AI Coach",
         "Fatigue & Recovery",
-        "Sleep",
-        "Long Runs",
-        "All Activities",
+        "AI Coach",
         "Training Intelligence",
-        "Workouts",
+        "All Activities",
         "FM Plan",
-        "Profile",
     ])
-
-    with tab_latest:
-        render_latest_run(data)
-
-    with tab_garmin:
-        render_garmin()
 
     with tab_trends:
         render_trends(data)
 
+    with tab_garmin:
+        render_garmin()
+
     with tab_be:
         render_best_efforts_tab()
 
-    with tab_ai:
-        render_ai_coach(data)
-
     with tab_fatigue:
         render_fatigue(data)
-
-    with tab_sleep:
+        st.markdown("---")
         render_sleep()
 
-    with tab_long:
-        render_long_runs(data)
-
-    with tab_all:
-        render_all_activities(data)
+    with tab_ai:
+        render_ai_coach(data)
+        st.markdown("---")
+        st.subheader("Generate a Workout")
+        render_workouts(data)
 
     with tab_intel:
         render_training_intelligence(data)
+        st.markdown("---")
+        render_long_runs(data)
 
-    with tab_workout:
-        render_workouts(data)
+    with tab_all:
+        render_latest_run(data)
+        st.markdown("---")
+        render_all_activities(data)
 
     with tab_plan:
         render_fm_plan()
-
-    with tab_profile:
-        render_profile()
 
 
 if __name__ == "__main__":
