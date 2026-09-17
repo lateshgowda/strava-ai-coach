@@ -662,6 +662,21 @@ async def plan_import_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/plan/download")
+async def plan_download_endpoint():
+    """Serve the FM plan xlsx for download."""
+    from fastapi.responses import FileResponse
+    from backend.services.plan_service import PLAN_FILE
+
+    if not PLAN_FILE.exists():
+        raise HTTPException(status_code=404, detail="Plan file not found")
+    return FileResponse(
+        path=str(PLAN_FILE),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=PLAN_FILE.name,
+    )
+
+
 @app.get("/plan/status")
 async def plan_status_endpoint(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Return high-level FM plan statistics (no activity matching)."""

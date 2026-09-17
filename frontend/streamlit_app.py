@@ -2620,8 +2620,22 @@ def _plan_badge(status: str) -> str:
 
 
 def render_fm_plan() -> None:
-    st.header("FM Plan Tracker")
-    st.caption("Full marathon training plan — Sep 2026 → Sep 2027 target.")
+    hdr_col, dl_col = st.columns([5, 1])
+    hdr_col.header("FM Plan Tracker")
+    hdr_col.caption("Full marathon training plan — Sep 2026 → Sep 2027 target.")
+    with dl_col:
+        try:
+            xlsx_resp = requests.get(f"{BACKEND_URL}/plan/download", timeout=10)
+            if xlsx_resp.status_code == 200:
+                st.download_button(
+                    label="⬇️ Spreadsheet",
+                    data=xlsx_resp.content,
+                    file_name="Latesh_FM_Plan.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
 
     # ---- plan status ----
     try:
