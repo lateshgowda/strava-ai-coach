@@ -1266,30 +1266,52 @@ def render_trends(_data: Dict[str, Any]) -> None:
     if sel_key == "distance_km" and valid_ys:
         sorted_desc = sorted(valid_ys, reverse=True)
         threshold = sorted_desc[min(2, len(sorted_desc) - 1)]
-        prev_i = -999
-        ay = -40
-        for i, v in enumerate(ys):
-            if v is None or v < threshold:
-                continue
-            marker_colors[i] = "#ECC94B"
-            marker_sizes[i]  = 12
-            # Alternate height when two top-3 points are close together
-            if i - prev_i <= 3:
-                ay = -70 if ay == -40 else -40
-            else:
-                ay = -40
-            annotations.append(dict(
-                x=xs_dates[i], y=v,
-                text=f"<b>{v:.1f} km</b>",
-                showarrow=True, arrowhead=2,
-                arrowcolor="#ECC94B",
-                ax=0, ay=ay,
-                font=dict(color="#ECC94B", size=11),
-                bgcolor="rgba(26,32,44,0.85)",
-                bordercolor="rgba(236,201,75,0.5)",
-                borderwidth=1, borderpad=3,
-            ))
-            prev_i = i
+
+        if period_key == "year":
+            # Years view: label every year; top-3 in gold, others in teal
+            for i, v in enumerate(ys):
+                if v is None:
+                    continue
+                is_top3 = v >= threshold
+                if is_top3:
+                    marker_colors[i] = "#ECC94B"
+                    marker_sizes[i]  = 12
+                annotations.append(dict(
+                    x=xs_dates[i], y=v,
+                    text=f"<b>{v:.0f} km</b>",
+                    showarrow=True, arrowhead=2,
+                    arrowcolor="#ECC94B" if is_top3 else "#38b2ac",
+                    ax=0, ay=-40,
+                    font=dict(color="#ECC94B" if is_top3 else "#e2e8f0", size=11),
+                    bgcolor="rgba(26,32,44,0.85)",
+                    bordercolor="rgba(236,201,75,0.5)" if is_top3 else "rgba(56,178,172,0.3)",
+                    borderwidth=1, borderpad=3,
+                ))
+        else:
+            # Weeks/months: top-3 only, with crowding-aware vertical offsets
+            prev_i = -999
+            ay = -40
+            for i, v in enumerate(ys):
+                if v is None or v < threshold:
+                    continue
+                marker_colors[i] = "#ECC94B"
+                marker_sizes[i]  = 12
+                if i - prev_i <= 3:
+                    ay = -70 if ay == -40 else -40
+                else:
+                    ay = -40
+                annotations.append(dict(
+                    x=xs_dates[i], y=v,
+                    text=f"<b>{v:.1f} km</b>",
+                    showarrow=True, arrowhead=2,
+                    arrowcolor="#ECC94B",
+                    ax=0, ay=ay,
+                    font=dict(color="#ECC94B", size=11),
+                    bgcolor="rgba(26,32,44,0.85)",
+                    bordercolor="rgba(236,201,75,0.5)",
+                    borderwidth=1, borderpad=3,
+                ))
+                prev_i = i
 
     # Current-period annotation (all metrics, teal — skipped if already a top-3 gold dot)
     top3_indices = {i for i, v in enumerate(ys) if v is not None and annotations
